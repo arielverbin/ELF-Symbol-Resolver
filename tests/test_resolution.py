@@ -7,6 +7,7 @@ the stand-ins for IDA's modules (see fakes.example_binary and fake_ida_modules.p
   * A symbol met again, alone or nested in another, is answered from memory.
   * An interrupted resolve raises ResolveInterrupted, and isn't remembered.
 """
+import logging
 import pytest
 from elfresolver import Function, GlobalVar, PLTEntry, ResolvedSymbol, String
 from elfresolver.exceptions import ResolveInterrupted
@@ -93,3 +94,21 @@ def test_an_interrupted_resolve_is_resolved_afresh_next_time(ida):
         resolution.of(PARSER).resolve()
     interrupted = False
     assert resolution.of(PARSER).resolve() == {PARSE}
+
+
+def test_the_log_follows_the_recursion(resolution, caplog):
+    """Each symbol logs its own resolve, one level deep, as the recursion reaches it: inner ones first to finish."""
+    caplog.set_level(logging.INFO, logger="elfresolver.ida.resolution")
+    recvfrom, prompt = PLTEntry("recvfrom"), String("enter input")
+    reader = Function().calls(recvfrom).references(prompt)
+    resolution.resolve(reader)
+    resolution.resolve(Function().called_by(reader))
+    assert caplog.messages[:6] == [
+        f"Resolving {reader!r}",
+        f"Resolving {recvfrom!r}",
+        f"{recvfrom!r}: 1 match(es)",
+        f"Resolving {prompt!r}",
+        f"{prompt!r}: 1 match(es)",
+        f"{reader!r}: 1 match(es)",
+    ]
+    assert f"{reader!r}: 1 match(es), resolved before" in caplog.messages[6:]

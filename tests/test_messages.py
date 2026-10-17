@@ -38,6 +38,12 @@ def test_a_symbol_comes_back_hashable_and_equal():
     assert hash(resolve.symbol) == hash(SYMBOL)
 
 
+def test_a_symbol_comes_back_with_its_id():
+    """So IDA's logs name a symbol, and every symbol in it, as the resolver's side does."""
+    resolve = Message.from_serialized(ResolveRequest(SYMBOL).serialize())
+    assert repr(resolve.symbol) == repr(SYMBOL)
+
+
 def test_every_request_has_a_token_of_its_own():
     first, second = ResolveRequest(SYMBOL), ResolveRequest(SYMBOL)
     assert first.token != second.token

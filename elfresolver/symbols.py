@@ -11,6 +11,7 @@ class Symbol(Serializable):
     def __init__(self, name: str | None = None) -> None:
         """`name` forces a Matching constaint with an exact match.
         Use `.matching(regex)` for patterns."""
+        self.id = hex(id(self))  # how its repr, and the logs, name it: on IDA's side too (see from_fields)
         self._constraints: tuple[IDAConstraint, ...] = (
             (Matching(rf"\A{re.escape(name)}\Z"),) if name is not None else ()
         )
@@ -27,11 +28,13 @@ class Symbol(Serializable):
         return self._constraints
 
     def to_fields(self) -> Mapping[str, object]:
-        return {"constraints": self._constraints}
+        return {"id": self.id, "constraints": self._constraints}
 
     @classmethod
     def from_fields(cls, values: Mapping[str, object]) -> Self:
-        return cls.from_constraints(values["constraints"])  # type: ignore[arg-type]
+        symbol = cls.from_constraints(values["constraints"])  # type: ignore[arg-type]
+        symbol.id = str(values["id"])  # the id it was sent with: both sides' logs name it alike
+        return symbol
 
     def references(self, target: Symbol) -> Self:
         """This symbol, also referring to `target`'s address: as code taking it,
@@ -58,9 +61,7 @@ class Symbol(Serializable):
         return hash((type(self), self._constraints))
 
     def __repr__(self) -> str:
-        """The expression that builds this symbol: `Function().calls(PLTEntry('recvfrom'))`."""
-        constraints = list(self._constraints)
-        return f"{type(self).__name__}()" + "".join(map(str, constraints))
+        return f"{type(self).__name__}({self.id})" + "".join(map(str, self._constraints))
 
 
 class Function(Symbol):

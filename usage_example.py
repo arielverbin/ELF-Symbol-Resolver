@@ -8,9 +8,9 @@ Needs gcc, and IDA running Python 3.11 or newer (see idapyswitch).
 """
 import logging
 import subprocess
-import tempfile
 from pathlib import Path
-from elfresolver import ELFResolver, Function, GlobalVar, PLTEntry, String
+from elfresolver import ELFResolver
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 from elfresolver.exceptions import SymbolNotFoundError
 
 SOURCE = r"""

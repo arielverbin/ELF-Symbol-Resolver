@@ -52,19 +52,18 @@ def test_symbols_with_other_constraints_differ():
     assert PLTEntry("recvfrom") != PLTEntry("recv")
 
 
-def test_repr_is_the_expression_that_builds_the_symbol():
-    symbol = GlobalVar().referenced_by(Function().called_by(READER)).matching("^g_")
-    expression = (
-        "GlobalVar().referenced_by(Function().called_by("
-        "Function().calls(PLTEntry('recvfrom')).references(String('enter input')))).matching('^g_')"
-    )
-    assert repr(symbol) == expression
-    assert eval(expression) == symbol
+def test_repr_goes_one_level_deep_naming_the_symbols_in_it_by_their_ids():
+    parser = Function().called_by(READER)
+    symbol = GlobalVar().referenced_by(parser).matching("^g_")
+    assert repr(symbol) == f"GlobalVar({hex(id(symbol))}).referenced_by({hex(id(parser))}).matching('^g_')"
+    assert repr(parser) == f"Function({hex(id(parser))}).called_by({hex(id(READER))})"
 
 
-@pytest.mark.parametrize("name", ["ns::Box<int>::get(int) const", "request #%d: %.*s\n", "a\\Zb"])
-def test_repr_builds_a_name_with_regex_characters_again(name):
-    assert eval(repr(PLTEntry(name))) == PLTEntry(name)
+def test_every_symbol_has_an_id_of_its_own():
+    """Equal symbols are still told apart in the logs: each step of a chain is a symbol of its own."""
+    assert PLTEntry("recvfrom").id != PLTEntry("recvfrom").id
+    function = Function()
+    assert function.calls(READER).id != function.id
 
 
 def test_a_plt_entry_is_a_function():

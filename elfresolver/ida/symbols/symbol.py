@@ -1,5 +1,4 @@
 from __future__ import annotations
-import logging
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Iterable, Iterator
@@ -15,8 +14,6 @@ from elfresolver.symbols import Symbol
 
 if TYPE_CHECKING:
     from elfresolver.ida.resolution import Resolution
-
-logger = logging.getLogger(__name__)
 
 _PLT = (".plt", ".plt.sec", ".plt.got", ".iplt")
 _GOT = (".got", ".got.plt")
@@ -35,8 +32,12 @@ class IDASymbol(ABC):
         if self._matches is None:
             allowed = [self._step_resolve(constraint) for constraint in self.symbol.constraints]
             self._matches = frozenset.intersection(*allowed) if allowed else frozenset(self.all())
-            logger.debug("%r: %d match(es)", self.symbol, len(self._matches))
         return self._matches
+
+    @property
+    def resolved(self) -> bool:
+        """True once resolve() has found the matches: asking again only remembers them."""
+        return self._matches is not None
 
     def bodies(self) -> Iterator[int]:
         """Every address the matches are made of."""
@@ -113,12 +114,9 @@ class IDASymbol(ABC):
         """The symbols of this kind `constraint` allows. The symbols in it resolve first,
         so a cancel is noticed between them."""
         arguments = [
-            self._resolution.of(value) if isinstance(value, Symbol) else value
+            self._resolution.resolve(value) if isinstance(value, Symbol) else value
             for value in vars(constraint).values()
         ]
-        for argument in arguments:
-            if isinstance(argument, IDASymbol):
-                argument.resolve()
 
         # give runtime for `interrupted` to check if a cancellation occured (we
         # cannot be multithreaded inside IDA :/)

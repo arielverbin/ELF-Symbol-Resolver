@@ -60,16 +60,14 @@ class Server:
 
     def _answer(self, symbol: Symbol) -> IDAResponse:
         try:
-            # parse requested symbol as an IDASymbol
-            resolvable = self._resolution.of(symbol)
-            # recursively resolve its constraints using the `.resolve` entry
-            addresses = resolvable.resolve()
+            # parse requested symbol as an IDASymbol, and resolve it: its constraints recursively, each logged
+            resolvable = self._resolution.resolve(symbol)
         except ResolveInterrupted:
             logger.info("Cancelled resolving %r", symbol)
             return CancelResponse(token=self._token)
         except Exception as error:
             return self._failure(error)
-        logger.info("%r: %d match(es)", symbol, len(addresses))
+        addresses = resolvable.resolve()  # remembered
         return ResolveResponse(tuple(resolvable.describe(address) for address in sorted(addresses)), token=self._token)
 
     def _cancel_arrived(self) -> bool:

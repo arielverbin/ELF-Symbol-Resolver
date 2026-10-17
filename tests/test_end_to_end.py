@@ -56,7 +56,9 @@ def test_records_logged_inside_ida_are_logged_again(fake_ida, cache, write_binar
     caplog.set_level(logging.INFO, logger="elfresolver")
     with ELFResolver(write_binary(example_binary()), ida_dir=fake_ida, cache=cache) as resolver:
         resolver.resolve(READER)
-    assert ("elfresolver.ida.server", logging.INFO, f"{READER!r}: 1 match(es)") in caplog.record_tuples
+    recvfrom = READER.constraints[0].callee  # nested in it: its resolve is logged too, under the id it has here
+    assert ("elfresolver.ida.resolution", logging.INFO, f"Resolving {recvfrom!r}") in caplog.record_tuples
+    assert ("elfresolver.ida.resolution", logging.INFO, f"{READER!r}: 1 match(es)") in caplog.record_tuples
 
 
 def test_an_exception_inside_ida_raises_with_its_traceback(fake_ida, cache, write_binary):

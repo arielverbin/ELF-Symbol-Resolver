@@ -65,7 +65,19 @@ nest them.
 `SymbolNotFoundError`; when it matches several things, `AmbiguousSymbolError`, with every match:
 
 ```
-SymbolNotFoundError: Nothing matches Function().called_by(Function().calls(PLTEntry('sendto')).references(String('enter input')))
+SymbolNotFoundError: Nothing matches Function(0x10bc4f190).calls(0x10bc4e3d0).references(0x10ad1c310)
+```
+
+A symbol's repr goes one level deep, naming each symbol in it by its id (`hex(id(symbol))`).
+IDA's side logs each symbol it resolves under the same id as the recursion reaches it, so the
+log shows which nested symbol matched nothing:
+
+```
+elfresolver.ida.resolution: Resolving Function(0x10bc4f190).calls(0x10bc4e3d0).references(0x10ad1c310)
+elfresolver.ida.resolution: Resolving PLTEntry(0x10bc4e3d0).matching('\\Asendto\\Z')
+elfresolver.ida.resolution: PLTEntry(0x10bc4e3d0).matching('\\Asendto\\Z'): 0 match(es)
+elfresolver.ida.resolution: String(0x10ad1c310).matching('\\Aenter\\ input\\Z'): 1 match(es), resolved before
+elfresolver.ida.resolution: Function(0x10bc4f190).calls(0x10bc4e3d0).references(0x10ad1c310): 0 match(es)
 ```
 
 ### Writing symbols that last

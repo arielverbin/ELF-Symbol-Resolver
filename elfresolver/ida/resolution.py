@@ -22,6 +22,16 @@ class Resolution:
         self.interrupted = interrupted
         self._symbols: dict[Symbol, IDASymbol] = {}  # cache resolved symbols
 
+    def resolve(self, symbol: Symbol) -> IDASymbol:
+        """Resolves the IDASymbol of `symbol` (main logic entry.)"""
+        resolvable = self.of(symbol)
+        if resolvable.resolved:
+            logger.info("%r: %d match(es), resolved before", symbol, len(resolvable.resolve()))
+        else:
+            logger.info("Resolving %r", symbol)
+            logger.info("%r: %d match(es)", symbol, len(resolvable.resolve()))
+        return resolvable
+
     def of(self, symbol: Symbol) -> IDASymbol:
         """The IDASymbol of `symbol`: the same one for every symbol equal to it."""
         if symbol not in self._symbols:

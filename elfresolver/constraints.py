@@ -14,8 +14,9 @@ class IDAConstraint(Serializable):
     method: ClassVar[str]
 
     def __str__(self) -> str:
+        from elfresolver.symbols import Symbol  # symbols.py imports this module
         (argument,) = vars(self).values()  # each holds one value: its method's argument
-        return f".{self.method}({argument!r})"
+        return f".{self.method}({argument.id if isinstance(argument, Symbol) else repr(argument)})"
 
 
 @dataclass(frozen=True)

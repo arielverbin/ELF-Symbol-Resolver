@@ -1,0 +1,166 @@
+# ELF Resolver
+
+Find functions and globals in stripped ELF binaries by what they call and reference.
+
+You reverse-engineered a binary once. Then a new build arrives: another architecture,
+another optimization level, a few changed source files. Every address you found has
+moved, and the symbol names are still gone. elfresolver lets you write down *how* you
+found each symbol, as constraints that hold in every build, and finds it again in each
+one with a headless IDA:
+
+```python
+from elfresolver import ELFResolver, Function, GlobalVar, PLTEntry, String
+
+reader = Function().calls(PLTEntry("recvfrom")).references(String("enter input"))
+parser = Function().called_by(reader)
+counter = GlobalVar().referenced_by(parser)
+
+with ELFResolver("build/server.stripped") as resolver:
+    print(hex(resolver.resolve(parser).offset))
+    print(hex(resolver.resolve(counter).offset))   # `parser` is already resolved: answered from memory
+```
+
+---
+
+## Quick start
+
+Requires Python 3.11+, and IDA (8.x or 9.x) with its Python switched to 3.11+ (`idapyswitch`).
+Nothing needs to be installed into IDA's Python. From a checkout of this repository:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
+export IDADIR=/path/to/ida      # or pass ELFResolver(..., ida_dir=...)
+python usage_example.py
+```
+
+---
+
+## Symbols
+
+A symbol is its kind and the constraints it must satisfy. Each constraint method returns
+a new symbol, one constraint richer, so symbols are values: build them once, share them,
+nest them.
+
+| Kind        | What it matches                                                                 |
+|-------------|----------------------------------------------------------------------------------|
+| `Function`  | a function of the binary's own code                                             |
+| `PLTEntry`  | an imported function's PLT stub, named by the import's demangled name (a `Function` too) |
+| `GlobalVar` | a data item where variables live (`.data`, `.bss`, `.rodata`, ...), other than a string |
+| `String`    | a NUL-terminated string literal, named by its text                               |
+
+| Constraint                | On          | Holds when the symbol...                                            |
+|---------------------------|-------------|---------------------------------------------------------------------|
+| `Kind("name")`            | every kind  | is named exactly that, in full (an import's demangled name with or without its parameters, a string's text): an exact `.matching()` |
+| `.matching(regex)`        | every kind  | has a name (a string: its text) the regex finds a match in          |
+| `.references(symbol)`     | every kind  | refers to `symbol`'s address: code taking it, data holding a pointer to it |
+| `.referenced_by(symbol)`  | every kind  | has its address referred to by `symbol`                             |
+| `.calls(function)`        | `Function`  | calls `function`: directly, by a tail jump, or through a thunk      |
+| `.called_by(function)`    | `Function`  | is called by `function`                                             |
+
+`resolve(symbol)` returns its one match, a `ResolvedSymbol` with an `address` (as linked), an
+`offset` (from the image base: add it to where the binary is loaded), a `name` and a `size`.
+`resolve_all(symbol)` returns every match. When a symbol matches nothing, `resolve()` raises
+`SymbolNotFoundError`; when it matches several things, `AmbiguousSymbolError`, with every match:
+
+```
+SymbolNotFoundError: Nothing matches Function().called_by(Function().calls(PLTEntry('sendto')).references(String('enter input')))
+```
+
+### Writing symbols that last
+
+Anchor symbols on what survives from build to build: imports, strings and globals. Then walk
+one or two hops of calls. Internal call shapes change more than you'd think. Inlining,
+identical-code folding and LTO can merge functions, or make them disappear. GCC's `.cold`
+splitting can move a function's error paths, and their strings, into a function of their own.
+`resolve()` failing loudly is the safety net: a symbol that still resolves to exactly one match
+still describes one thing.
+
+Architectures don't matter to a symbol. Calls and references are normalized inside IDA:
+
+- a tail jump (`-O2`) is a call, and a local thunk is seen through
+- PIC code reaching a global through its GOT slot references the global
+- ARM loading an address from a literal pool references what the pool holds
+- PLT stubs are found in `.plt`, `.plt.sec` (`-fcf-protection`) and `.plt.got`
+
+Strings are read from the binary's bytes, not from IDA's string list: a literal is the
+printable text between two NULs. A name is matched whole: `String("input")` doesn't match
+`"enter input"`, while `String().matching("input$")` does.
+
+---
+
+## How it works
+
+```
+ your Python                                      IDA's Python (idat -A, headless)
+ ┌───────────────────────────┐  loopback TCP   ┌────────────────────────────────┐
+ │ elfresolver.resolver      │◀── JSON frames ─▶│ elfresolver.ida                │
+ │   ELFResolver             │                  │   bootstrap → server           │
+ │   IDASession              │                  │     → resolution → symbols/    │
+ │   DatabaseCache           │                  │                                │
+ └─────────────┬─────────────┘                  └───────────────┬────────────────┘
+               └────▶ symbols · constraints · messages · connection ◀────┘
+```
+
+`ELFResolver` starts `idat` headless on the binary with `elfresolver/ida/bootstrap.py`, which
+puts the resolver's own copy of elfresolver on IDA's `sys.path`. Then the conversation goes:
+
+1. The resolver listens on a free loopback port (TCP works the same on Windows), and passes IDA
+   the launch through its environment: the port to connect back to, and a token.
+2. IDA connects back and says Hello, echoing the token, which only the IDA the resolver started
+   knows. If the first connection doesn't, starting fails.
+3. IDA says Ready once its auto-analysis is done.
+4. IDA answers each symbol it's sent. Every request carries a token of its own, which its answer echoes.
+5. On leaving the `with` block, the resolver asks IDA to shut down.
+
+Inside IDA, each constraint allows a set of addresses, and a symbol's matches are the
+addresses all of them allow. A constraint relating to another symbol is followed back from that
+symbol's matches (usually one import or one string), so nothing is scanned for nothing.
+Every symbol is resolved once per session: met again, alone or nested, it is answered from memory.
+
+Everything IDA's side logs is logged again on your side, under the same logger names. An
+exception inside IDA is raised as an `IDAError`, with IDA's traceback attached as a note.
+
+**Ctrl+C** cancels the resolve under way: IDA stays up, and `resolve()` goes on working. A
+second Ctrl+C, or one during auto-analysis, kills IDA. IDA runs in a process group of its own,
+so the console's Ctrl+C reaches only the resolver.
+
+**The database cache** keeps the IDA database of every binary IDA analyzed, keyed by the
+SHA-256 of its content, under `$ELFRESOLVER_CACHE` (by default, the platform's cache directory).
+Only the first run on a binary waits for auto-analysis. Entries are never opened in place:
+IDA works on a copy, so neither concurrent resolvers nor a crashed IDA can corrupt one. A
+database is stored only after its IDA exited cleanly.
+
+---
+
+## Running the tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+Most tests need no IDA. IDA's side of elfresolver runs, unchanged, on stand-ins for IDA's Python
+modules over a made-up binary (`tests/fake_ida_modules.py`). A stand-in `idat`
+(`tests/fake_idat.py`) runs the real `bootstrap.py` on them, so the whole path is exercised for
+real: the process, the connection, IDA's kinds of symbols, logs, errors, cancellation and the cache.
+
+The tests marked `ida` run the real IDA, found through `$IDADIR`. They build `tests/server.c` for
+x86-64 (`-O0`, `-O2`, `-no-pie`, a shared object), i686, aarch64 and armhf, strip each build,
+and check that the same symbols resolve in all of them to the addresses in the unstripped build's
+symbol table. A build whose compiler isn't installed is skipped. On Debian/Ubuntu:
+`sudo apt-get install gcc-x86-64-linux-gnu gcc-i686-linux-gnu gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf`.
+
+---
+
+## Next
+
+- **VTables** (Itanium C++ ABI): `VTable("net::Connection")`, found through its typeinfo name,
+  and `.slot(n)` to get a virtual function as a `Function`.
+- **Control flow**: `.with_loops()`, `.with_switch(cases=5)`, basic-block counts.
+- **More constraints**: `.uses_constant(0xDEADBEEF)`, constant call arguments, call order,
+  transitive calls (`.reaches(x, depth=3)`), callbacks (`.passed_to(PLTEntry("pthread_create"), arg=2)`),
+  reads and writes of a global, `Export("name")`, negation and alternatives.
+- **Infrastructure**: a result cache that skips IDA altogether for builds seen before, an idalib
+  backend, a pool of IDAs for many builds, and a CLI emitting offsets as JSON or a C header.

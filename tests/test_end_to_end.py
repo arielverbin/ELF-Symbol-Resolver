@@ -13,7 +13,8 @@ import _thread
 import logging
 import threading
 import pytest
-from elfresolver import ELFResolver, Function, GlobalVar, PLTEntry, String
+from elfresolver import ELFResolver
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 from elfresolver.exceptions import AmbiguousSymbolError, IDAError, IDAStartupError, SymbolNotFoundError
 from fakes import example_binary
 

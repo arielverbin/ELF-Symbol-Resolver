@@ -9,7 +9,8 @@ the stand-ins for IDA's modules (see fakes.example_binary and fake_ida_modules.p
 """
 import logging
 import pytest
-from elfresolver import Function, GlobalVar, PLTEntry, ResolvedSymbol, String
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
+from elfresolver import ResolvedSymbol
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.resolution import Resolution
 

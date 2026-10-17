@@ -2,11 +2,11 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass
 from typing import Iterable, Iterator
-import ida_funcs
-import ida_idaapi
-import ida_name
-import ida_segment
-import idautils
+import ida_funcs # type: ignore
+import ida_idaapi # type: ignore
+import ida_name # type: ignore
+import ida_segment # type: ignore
+import idautils # type: ignore
 from elfresolver.ida.symbols.function import IDAFunction
 from elfresolver.ida.symbols.symbol import name_forms, without_version
 from elfresolver.messages import ResolvedSymbol

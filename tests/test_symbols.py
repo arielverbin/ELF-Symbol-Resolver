@@ -9,7 +9,7 @@ Tests for the symbols: the values a resolver is asked to find.
 """
 import re
 import pytest
-from elfresolver import Function, GlobalVar, PLTEntry, String
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 from elfresolver.constraints import Calls, Matching, References
 
 READER = Function().calls(PLTEntry("recvfrom")).references(String("enter input"))

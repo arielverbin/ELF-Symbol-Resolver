@@ -9,7 +9,7 @@ explains (see IDASession).
 import os
 import sys
 import traceback
-import ida_pro
+import ida_pro # type: ignore
 
 INCOMPATIBLE_PYTHON = 3  # the exit code for an IDA Python older than elfresolver's
 

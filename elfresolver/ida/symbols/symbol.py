@@ -2,11 +2,11 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Iterable, Iterator
-import ida_bytes
-import ida_nalt
-import ida_name
-import ida_segment
-import idautils
+import ida_bytes # type: ignore
+import ida_nalt # type: ignore
+import ida_name # type: ignore
+import ida_segment # type: ignore
+import idautils # type: ignore
 from elfresolver.constraints import IDAConstraint
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.messages import ResolvedSymbol

@@ -2,9 +2,9 @@ from __future__ import annotations
 import logging
 import traceback
 import time
-import ida_auto
-import ida_loader
-import idc
+import ida_auto # type: ignore
+import ida_loader # type: ignore
+import idc # type: ignore
 from contextlib import contextmanager
 from typing import Callable, Generator, Mapping, Self
 from elfresolver.connection import Connection

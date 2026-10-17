@@ -13,8 +13,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 import pytest
-from elftools.elf.elffile import ELFFile
-from elfresolver import ELFResolver, Function, GlobalVar, PLTEntry, String
+ELFFile = pytest.importorskip("elftools.elf.elffile", reason="pyelftools isn't installed").ELFFile
+from elfresolver import ELFResolver
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 from elfresolver.exceptions import IDANotFoundError, SymbolNotFoundError
 from elfresolver.resolver.ida_session import find_idat
 from conftest import TESTS

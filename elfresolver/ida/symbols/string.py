@@ -1,7 +1,7 @@
 from __future__ import annotations
 import functools
 from typing import Iterable, Iterator
-import ida_bytes
+import ida_bytes # type: ignore
 from elfresolver.ida.symbols.global_var import IDAGlobalVar
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.messages import ResolvedSymbol

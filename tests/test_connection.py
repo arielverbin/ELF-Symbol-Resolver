@@ -9,7 +9,7 @@ import socket
 import struct
 import threading
 import pytest
-from elfresolver import Function, PLTEntry
+from elfresolver.symbols import Function, PLTEntry
 from elfresolver.connection import Connection, Listener
 from elfresolver.messages import CancelRequest, HelloResponse, ResolveRequest, ShutdownRequest
 

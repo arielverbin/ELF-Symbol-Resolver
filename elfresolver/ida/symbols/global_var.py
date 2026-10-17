@@ -1,9 +1,9 @@
 from __future__ import annotations
 from typing import Iterable, Iterator
-import ida_bytes
-import ida_name
-import ida_segment
-import idautils
+import ida_bytes # type: ignore
+import ida_name # type: ignore
+import ida_segment # type: ignore
+import idautils # type: ignore
 from elfresolver.ida.symbols.function import IDAFunction
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.messages import ResolvedSymbol

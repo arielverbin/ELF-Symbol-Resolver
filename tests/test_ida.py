@@ -100,6 +100,8 @@ def test_the_same_symbols_resolve_in_every_build(build, tmp_path):
 
 def test_a_symbol_nothing_matches_raises(tmp_path):
     _, stripped = _build(BUILDS[1], tmp_path)
+    symbol = Function().calls(PLTEntry("sendto"))
     with ELFResolver(stripped) as resolver:
-        with pytest.raises(SymbolNotFoundError, match=r"^Nothing matches Function\(\)\.calls\(PLTEntry\('sendto'\)\)$"):
-            resolver.resolve(Function().calls(PLTEntry("sendto")))
+        with pytest.raises(SymbolNotFoundError) as raised:
+            resolver.resolve(symbol)
+    assert str(raised.value) == f"Nothing matches {symbol!r}"

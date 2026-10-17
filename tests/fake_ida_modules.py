@@ -122,14 +122,12 @@ class FakeIDA:
     # ida_segment
 
     def getseg(self, ea: int) -> Segment | None:
-        self._query()
         return next((segment for segment in self._segments if segment.start_ea <= ea < segment.end_ea), None)
 
     def get_segm_name(self, segment: Segment) -> str:
         return segment.name
 
     def get_segm_qty(self) -> int:
-        self._query()
         return len(self._segments)
 
     def getnseg(self, index: int) -> Segment:
@@ -138,7 +136,6 @@ class FakeIDA:
     # ida_bytes
 
     def get_flags(self, ea: int) -> int:
-        self._query()
         item = self._items.get(ea)
         referred = any(xref.to == ea for xref in self._xrefs)
         return (item.flags if item is not None else 0) | (_XREF if referred else 0)
@@ -208,7 +205,6 @@ class FakeIDA:
     # idautils
 
     def Functions(self) -> list[int]:
-        self._query()
         return sorted(item.start for item in self._items.values() if item.segment in (".text", ".plt"))
 
     def Chunks(self, entry: int) -> list[tuple[int, int]]:
@@ -216,7 +212,6 @@ class FakeIDA:
         return [(function.start_ea, function.end_ea)] if function is not None else []
 
     def Heads(self, start: int, end: int) -> list[int]:
-        self._query()
         return sorted(head for head in self._items if start <= head < end)
 
     def XrefsFrom(self, ea: int) -> list[Xref]:
@@ -236,13 +231,10 @@ class FakeIDA:
         self._look_up()
         return [xref.frm for xref in self._xrefs if xref.to == ea and xref.type == self.dr_O]
 
-    def _query(self) -> None:
+    def _look_up(self) -> None:
+        """A lookup of cross-references: each takes the binary's `delay`, and a broken binary's raises."""
         if self.binary.broken:
             raise RuntimeError("The fake database is broken")
-
-    def _look_up(self) -> None:
-        """A lookup of cross-references: each takes the binary's `delay`."""
-        self._query()
         time.sleep(self.binary.delay)
 
     def _add(self, item: _Item) -> None:

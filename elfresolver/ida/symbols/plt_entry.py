@@ -54,7 +54,7 @@ def _imports() -> dict[int, _Import]:
     imports = {}
     for stub in (entry for entry in idautils.Functions() if in_plt(entry)):
         if (target := _import_of(stub)) is not None:
-            name = without_version(ida_name.get_name(target))
+            name = without_version(ida_name.get_name(target)).removeprefix("__imp_")  # IDA's ARM import names have it
             imports[stub] = _Import(name, ida_name.demangle_name(name, 0))
     return imports
 

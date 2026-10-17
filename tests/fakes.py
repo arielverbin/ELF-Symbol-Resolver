@@ -29,7 +29,7 @@ class FakeBinary:
     calls: list[tuple[int, int]] = field(default_factory=list)        # (caller, callee)
     references: list[tuple[int, int]] = field(default_factory=list)   # (source, target)
     delay: float = 0.0          # seconds each lookup of cross-references takes, for a test to cancel in time
-    broken: bool = False        # every query of the database raises inside "IDA"
+    broken: bool = False        # every lookup of cross-references raises inside "IDA"
     crash_on_start: int = 0     # the exit code "IDA" exits with before connecting back, if any
     impostor: bool = False      # something other than "IDA" connects back first, and doesn't know the launch's token
 

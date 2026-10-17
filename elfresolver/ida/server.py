@@ -10,6 +10,7 @@ from typing import Callable, Generator, Mapping, Self
 from elfresolver.connection import Connection
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.resolution import Resolution
+from elfresolver.ida.symbols.function import separate_tail_called_functions
 from elfresolver.messages import (
     CancelRequest, CancelResponse, FailureResponse, HelloResponse, IDALaunchEnv, IDAResponse, LogResponse,
     ReadyResponse, ResolveRequest, ResolveResponse, ShutdownRequest,
@@ -83,10 +84,12 @@ class Server:
         )
 
     def _wait_for_analysis(self) -> None:
-        """Return once IDA's auto-analysis of the open database has finished."""
+        """Return once IDA's auto-analysis of the open database has finished, and its functions are each one of their own."""
         logger.info("Waiting for IDA's auto-analysis")
         started = time.monotonic()
         ida_auto.auto_wait()
+        separate_tail_called_functions()
+        ida_auto.auto_wait()  # for the functions that made
         logger.info("Auto-analysis finished in %.1fs", time.monotonic() - started)
 
     def _save_database(self) -> None:

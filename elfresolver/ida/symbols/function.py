@@ -1,5 +1,7 @@
 from __future__ import annotations
+import logging
 from typing import Iterable, Iterator
+import ida_bytes # type: ignore
 import ida_funcs # type: ignore
 import ida_idaapi # type: ignore
 import ida_xref # type: ignore
@@ -8,9 +10,12 @@ from elfresolver.ida.layout import in_own_code
 from elfresolver.ida.symbols.symbol import IDASymbol, data_refs_from
 from elfresolver.messages import ResolvedSymbol
 
+logger = logging.getLogger(__name__)
+
 _CALLS = (ida_xref.fl_CN, ida_xref.fl_CF)
 _JUMPS = (ida_xref.fl_JN, ida_xref.fl_JF)
 _LONGEST_THUNK_CHAIN = 8  # thunks of thunks followed, at most: never round in circles
+_PC_THUNK_REGISTERS = (0x04, 0x0C, 0x14, 0x1C, 0x2C, 0x34, 0x3C)  # ModRM bytes of `mov eax..edi, [esp]`
 
 
 class IDAFunction(IDASymbol):
@@ -60,6 +65,27 @@ def is_entry(address: int) -> bool:
     return entry_of(address) == address
 
 
+def separate_tail_called_functions() -> None:
+    """
+    Make a function of its own of every function IDA folded into its caller, as one
+    of its chunks, because the caller only ever tail-jumps to it (aarch64 at -O2:
+    read_request ends in `b parse_request`). Such a chunk is where the jump ending
+    another chunk of the same function lands. Once separate, that jump is a tail call.
+    """
+    for entry in list(idautils.Functions()):
+        chunks = list(idautils.Chunks(entry))
+        if len(chunks) < 2:
+            continue
+        tails = {start for start, _ in chunks} - {entry}
+        for start, end in chunks:
+            if not (heads := list(idautils.Heads(start, end))):
+                continue
+            for xref in idautils.XrefsFrom(heads[-1]):
+                if xref.type in _JUMPS and xref.to in tails and ida_funcs.remove_func_tail(ida_funcs.get_func(entry), xref.to):
+                    ida_funcs.add_func(xref.to)
+                    logger.debug("Made a function of %#x, which IDA had folded into %#x", xref.to, entry)
+
+
 def _heads_of(entries: Iterable[int]) -> Iterator[int]:
     """Every head of the functions at `entries`, in all their chunks: their instructions, and the data inside them."""
     for entry in entries:
@@ -86,10 +112,21 @@ def _callees(addresses: Iterable[int]) -> Iterator[int]:
 
 
 def _is_call(xref: idautils._xref) -> bool:
-    """True for a call, and for a jump to another function's entry: a tail call (never for data, nor for flowing on)."""
+    """
+    True for a call, and for a jump to another function's entry: a tail call. Never
+    for data, nor for flowing on, nor for a call that only reads the program counter.
+    """
+    if _is_pc_thunk(xref.to):
+        return False
     if xref.type in _CALLS:
         return True
     return xref.type in _JUMPS and is_entry(xref.to) and entry_of(xref.frm) != xref.to
+
+
+def _is_pc_thunk(address: int) -> bool:
+    """True for i686's PC thunk (`__x86.get_pc_thunk.bx`): `mov reg, [esp]; ret`, which PIC code calls for its own address."""
+    code = ida_bytes.get_bytes(address, 4)
+    return code is not None and code[0] == 0x8B and code[1] in _PC_THUNK_REGISTERS and code[2:] == b"\x24\xc3"
 
 
 def _past_thunks(address: int) -> int:

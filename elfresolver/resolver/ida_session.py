@@ -26,7 +26,6 @@ _POLL_INTERVAL = 0.1      # seconds each wait for IDA lasts at most: a longer on
 _LOG_TAIL = 20            # lines of IDA's log shown when it dies
 
 _T = TypeVar("_T")
-_Response = TypeVar("_Response", bound=IDAResponse)
 
 
 class IDASession:
@@ -71,12 +70,15 @@ class IDASession:
         """Ask IDA to exit, and its exit code once it has. It is killed if it takes over `timeout` seconds, or on Ctrl+C."""
         try:
             with contextlib.suppress(ConnectionError):  # IDA is gone already
+                logger.info("Requesting IDA to shutdown...")
                 self._connection.send(ShutdownRequest())
             return self._process.wait(timeout)
         except subprocess.TimeoutExpired:
+            logger.warning("Timeout expired: killing IDA.")
             self._kill()
             return self._process.returncode
         except KeyboardInterrupt:
+            logger.warning("KeyboardInterrupt: killing IDA.")
             self._kill()
             raise
         finally:
@@ -100,7 +102,7 @@ class IDASession:
         except ConnectionError:
             raise self._exited() from None
 
-    def _response_to(self, request: IDARequest, expected: type[_Response]) -> _Response:
+    def _response_to(self, request: IDARequest, expected: type[IDAResponse]) -> IDAResponse:
         """IDA's response to `request`, which must be an `expected`. Log records
         meanwhile are logged again here, and responses to other requests
         dropped. A failure raises IDAError, whatever it answers: IDA may exit after one."""

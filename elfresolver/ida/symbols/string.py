@@ -2,7 +2,7 @@ from __future__ import annotations
 import functools
 from typing import Iterable, Iterator
 import ida_bytes # type: ignore
-from elfresolver.ida.symbols.global_var import IDAGlobalVar
+from elfresolver.ida.layout import variable_segments
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.messages import ResolvedSymbol
 
@@ -52,7 +52,7 @@ def _text_at(address: int) -> str | None:
 @functools.cache  # one IDA has one database open
 def _contents() -> list[tuple[int, bytes]]:
     """The bytes of every initialized segment where variables live, each with its start address."""
-    segments = (segment for segment in IDAGlobalVar.segments() if ida_bytes.is_loaded(segment.start_ea))
+    segments = (segment for segment in variable_segments() if ida_bytes.is_loaded(segment.start_ea))
     return [(segment.start_ea, ida_bytes.get_bytes(segment.start_ea, segment.size()) or b"") for segment in segments]
 
 

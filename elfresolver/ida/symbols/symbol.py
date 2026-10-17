@@ -2,21 +2,18 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Iterable, Iterator
-import ida_bytes # type: ignore
 import ida_nalt # type: ignore
 import ida_name # type: ignore
-import ida_segment # type: ignore
 import idautils # type: ignore
 from elfresolver.constraints import IDAConstraint
 from elfresolver.exceptions import ResolveInterrupted
+from elfresolver.ida.layout import is_cell
+from elfresolver.ida.names import name_forms
 from elfresolver.messages import ResolvedSymbol
 from elfresolver.symbols import Symbol
 
 if TYPE_CHECKING:
     from elfresolver.ida.resolution import Resolution
-
-_PLT = (".plt", ".plt.sec", ".plt.got", ".iplt")
-_GOT = (".got", ".got.plt")
 
 
 class IDASymbol(ABC):
@@ -39,14 +36,6 @@ class IDASymbol(ABC):
         """True once resolve() has found the matches: asking again only remembers them."""
         return self._matches is not None
 
-    def bodies(self) -> Iterator[int]:
-        """Every address the matches are made of."""
-        return (address for match in self.resolve() for address in self.body(match))
-
-    def referables(self) -> Iterator[int]:
-        """Every address a call or a reference must land on to reach a match."""
-        return (address for match in self.resolve() for address in self.referable(match))
-
     # The constraints every kind of symbol can carry.
 
     def matching(self, pattern: str) -> Iterable[int]:
@@ -55,12 +44,22 @@ class IDASymbol(ABC):
         return (address for address in self.all() if any(map(regex.search, self.names_of(address))))
 
     def references(self, target: IDASymbol) -> Iterable[int]:
-        """The symbols of this kind referring to `target`'s address: as code taking it, or as data holding a pointer to it."""
-        return self.owners(_references_to(target.referables()))
+        """The symbols of this kind referring to `target`: as code taking its address, or as data holding a pointer to it."""
+        return self.owners(target.references_to())
 
     def referenced_by(self, source: IDASymbol) -> Iterable[int]:
-        """The symbols of this kind `source` refers to, directly or through a cell."""
-        return self.owners(_references_from(source.bodies()))
+        """The symbols of this kind `source` refers to."""
+        return self.owners(source.references_from())
+
+    # What refers to the matches, and what they refer to: a kind with more to them than their address says so.
+
+    def references_to(self) -> Iterable[int]:
+        """Every address referring to one of the matches."""
+        return data_refs_to(self.resolve())
+
+    def references_from(self) -> Iterable[int]:
+        """Every address one of the matches refers to."""
+        return data_refs_from(self.resolve())
 
     # What this kind of symbol is.
 
@@ -81,34 +80,9 @@ class IDASymbol(ABC):
         name = ida_name.get_name(address)
         return name_forms(name, ida_name.demangle_name(name, 0)) if name else ()
 
-    def body(self, address: int) -> Iterable[int]:
-        """The addresses the symbol at `address` is made of: where its calls and references start."""
-        return ()
-
-    def referable(self, address: int) -> Iterable[int]:
-        """The addresses a call or a reference must land on to reach the symbol at `address`."""
-        return (address,)
-
     def found(self, address: int, name: str | None, size: int) -> ResolvedSymbol:
         """This symbol, found at `address`, named `name` and `size` bytes long."""
         return ResolvedSymbol(self.symbol, address, address - ida_nalt.get_imagebase(), name, size)
-
-    # Where an address lies in the ELF image.
-
-    @staticmethod
-    def segment_name(address: int) -> str | None:
-        segment = ida_segment.getseg(address)
-        return ida_segment.get_segm_name(segment) if segment is not None else None
-
-    @staticmethod
-    def in_plt(address: int) -> bool:
-        return IDASymbol.segment_name(address) in _PLT
-
-    @staticmethod
-    def in_code(address: int) -> bool:
-        """True inside the binary's own code: an executable segment, other than the PLT."""
-        segment = ida_segment.getseg(address)
-        return segment is not None and segment.type == ida_segment.SEG_CODE and not IDASymbol.in_plt(address)
 
     def _step_resolve(self, constraint: IDAConstraint) -> frozenset[int]:
         """The symbols of this kind `constraint` allows. The symbols in it resolve first,
@@ -127,46 +101,19 @@ class IDASymbol(ABC):
         return frozenset(getattr(self, constraint.method)(*arguments))
 
 
-def name_forms(name: str, demangled: str | None) -> tuple[str, ...]:
-    """Every form of a symbol's name it answers to: as linked, demangled, and demangled without its parameter list."""
-    forms = [name] if demangled is None else [name, demangled, without_parameters(demangled)]
-    return tuple(dict.fromkeys(forms))
-
-
-def without_version(name: str) -> str:
-    """An ELF symbol's name without its version: 'recvfrom@GLIBC_2.2.5' -> 'recvfrom'."""
-    return name.partition("@")[0]
-
-
-def without_parameters(name: str) -> str:
-    """A demangled name without its parameter list: 'ns::Box<int>::get(int) const' -> 'ns::Box<int>::get'."""
-    depth = 0
-    for index in range(name.rfind(")"), -1, -1):
-        depth += {")": 1, "(": -1}.get(name[index], 0)
-        if depth == 0:
-            return name[:index]
-    return name
-
-
-def _references_to(addresses: Iterable[int]) -> Iterator[int]:
+def data_refs_to(addresses: Iterable[int]) -> Iterator[int]:
     """What refers to `addresses`, and what refers to the cells among those."""
     for address in addresses:
         for source in idautils.DataRefsTo(address):
             yield source
-            if _is_cell(source):
+            if is_cell(source):
                 yield from idautils.DataRefsTo(source)
 
 
-def _references_from(addresses: Iterable[int]) -> Iterator[int]:
+def data_refs_from(addresses: Iterable[int]) -> Iterator[int]:
     """What `addresses` refer to, and what the cells among those point at."""
     for address in addresses:
         for target in idautils.DataRefsFrom(address):
             yield target
-            if _is_cell(target):
+            if is_cell(target):
                 yield from idautils.DataRefsFrom(target)
-
-
-def _is_cell(address: int) -> bool:
-    """True for a cell that only holds a pointer for code to load: a GOT slot, or a data word inside code (an ARM literal pool)."""
-    in_got = IDASymbol.segment_name(address) in _GOT
-    return in_got or (IDASymbol.in_code(address) and ida_bytes.is_data(ida_bytes.get_flags(address)))

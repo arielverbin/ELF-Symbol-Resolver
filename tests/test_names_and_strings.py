@@ -1,7 +1,8 @@
 """Tests for what IDA's side reads names and strings as: the names imports answer to, and C strings in raw bytes."""
 import pytest
 from elfresolver.ida.symbols.string import c_string_at, c_strings
-from elfresolver.ida.symbols.symbol import name_forms, without_parameters, without_version
+from elfresolver.ida.names import name_forms, without_parameters
+from elfresolver.ida.symbols.plt_entry import without_version
 
 
 @pytest.mark.parametrize(("demangled", "without"), [

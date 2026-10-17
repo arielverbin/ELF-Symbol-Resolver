@@ -54,6 +54,7 @@ class ELFResolver:
     def __exit__(self, *exc_info: object) -> None:
         try:
             exit_code = self._session.close()
+            logger.info("IDA exited with exit code of %d", exit_code)
             if self._analyzed_afresh and exit_code == 0:
                 self._cache.store(self._binary, self._database)
                 logger.info("Cached the database of %s", self._binary)

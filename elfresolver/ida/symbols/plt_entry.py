@@ -7,20 +7,29 @@ import ida_idaapi # type: ignore
 import ida_name # type: ignore
 import ida_segment # type: ignore
 import idautils # type: ignore
-from elfresolver.ida.symbols.function import IDAFunction
-from elfresolver.ida.symbols.symbol import name_forms, without_version
+from elfresolver.ida.layout import in_plt
+from elfresolver.ida.names import name_forms
+from elfresolver.ida.symbols.function import IDAFunction, entry_of
 from elfresolver.messages import ResolvedSymbol
 
 
 class IDAPLTEntry(IDAFunction):
     """The PLT stub of an imported function, named by the import's demangled name: in full, or without its parameter list."""
 
+    def calls_from(self) -> Iterator[int]:
+        """Nothing: a stub only jumps to its import, which is no function of the binary's own."""
+        return iter(())
+
+    def references_from(self) -> Iterator[int]:
+        """Nothing: a stub only loads its import's GOT slot."""
+        return iter(())
+
     def all(self) -> Iterable[int]:
         return _imports().keys()
 
     def owners(self, addresses: Iterable[int]) -> Iterator[int]:
         for address in addresses:
-            if (entry := self.entry_of(address)) in _imports():
+            if (entry := entry_of(address)) in _imports():
                 yield entry
 
     def names_of(self, stub: int) -> tuple[str, ...]:
@@ -30,10 +39,6 @@ class IDAPLTEntry(IDAFunction):
     def describe(self, stub: int) -> ResolvedSymbol:
         imported = _imports()[stub]
         return self.found(stub, imported.demangled or imported.name, ida_funcs.calc_func_size(ida_funcs.get_func(stub)))
-
-    def body(self, stub: int) -> Iterable[int]:
-        """Nothing: a stub's jump to its import is no call to follow, nor a reference."""
-        return ()
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,7 @@ class _Import:
 def _imports() -> dict[int, _Import]:
     """The import of every PLT stub, by the stub's address."""
     imports = {}
-    for stub in (entry for entry in idautils.Functions() if IDAPLTEntry.in_plt(entry)):
+    for stub in (entry for entry in idautils.Functions() if in_plt(entry)):
         if (target := _import_of(stub)) is not None:
             name = without_version(ida_name.get_name(target))
             imports[stub] = _Import(name, ida_name.demangle_name(name, 0))
@@ -68,3 +73,8 @@ def _in_extern(address: int) -> bool:
     """True inside IDA's extern segment, where it puts the imports."""
     segment = ida_segment.getseg(address)
     return segment is not None and segment.type == ida_segment.SEG_XTRN
+
+
+def without_version(name: str) -> str:
+    """An ELF symbol's name without its version: 'recvfrom@GLIBC_2.2.5' -> 'recvfrom'."""
+    return name.partition("@")[0]

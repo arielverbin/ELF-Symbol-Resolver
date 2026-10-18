@@ -144,7 +144,7 @@ function reads.
  │   IDASession              │                  │     → resolution → symbols/    │
  │   DatabaseCache           │                  │                                │
  └─────────────┬─────────────┘                  └───────────────┬────────────────┘
-               └────▶ symbols · constraints · messages · connection ◀────┘
+               └──────▶ symbols · constraints · protocol ◀──────┘
 ```
 
 `ELFResolver` starts `idat` headless on the binary with `elfresolver/ida/bootstrap.py`, which

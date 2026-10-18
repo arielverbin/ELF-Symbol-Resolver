@@ -10,8 +10,8 @@ import os
 import runpy
 from pathlib import Path
 import fake_ida_modules
-from elfresolver.connection import Connection
-from elfresolver.messages import HelloResponse, IDALaunchEnv
+from elfresolver.protocol.connection import Connection
+from elfresolver.protocol.messages import HelloResponse, IDALaunchEnv
 from fakes import FakeBinary
 
 

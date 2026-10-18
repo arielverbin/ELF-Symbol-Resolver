@@ -14,7 +14,7 @@ _KINDS: Mapping[type[Symbol], type[IDASymbol]] = {
 logger = logging.getLogger(__name__)
 
 
-class Resolution:
+class SymbolResolution:
     """Every symbol met in one database: an IDASymbol of its kind, built once, so it resolves once."""
 
     def __init__(self, interrupted: Callable[[], bool] = lambda: False) -> None:
@@ -24,15 +24,16 @@ class Resolution:
 
     def resolve(self, symbol: Symbol) -> IDASymbol:
         """Resolves the IDASymbol of `symbol` (main logic entry.)"""
-        resolvable = self.of(symbol)
+        resolvable = self.as_resolvable(symbol)
         if resolvable.resolved:
             logger.info("%r: %d match(es), resolved before", symbol, len(resolvable.resolve()))
         else:
             logger.info("Resolving %r", symbol)
-            logger.info("%r: %d match(es)", symbol, len(resolvable.resolve()))
+            matches = resolvable.resolve()
+            logger.info("%r: %d match(es)", symbol, len(matches))
         return resolvable
 
-    def of(self, symbol: Symbol) -> IDASymbol:
+    def as_resolvable(self, symbol: Symbol) -> IDASymbol:
         """The IDASymbol of `symbol`: the same one for every symbol equal to it."""
         if symbol not in self._symbols:
             self._symbols[symbol] = _KINDS[type(symbol)](symbol, self)

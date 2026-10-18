@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Self
 from elfresolver.exceptions import AmbiguousSymbolError, SymbolNotFoundError
-from elfresolver.messages import ResolvedSymbol
+from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.resolver.database_cache import DatabaseCache
 from elfresolver.resolver.ida_session import IDASession, find_idat
 from elfresolver.symbols import Symbol

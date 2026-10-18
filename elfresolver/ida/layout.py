@@ -1,6 +1,6 @@
 from __future__ import annotations
+from enum import Enum, auto
 from typing import Iterator
-import ida_bytes # type: ignore
 import ida_segment # type: ignore
 
 _PLT = (".plt", ".plt.sec", ".plt.got", ".iplt")
@@ -8,35 +8,35 @@ _GOT = (".got", ".got.plt")
 _VARIABLES = (".data", ".bss", ".rodata", ".sdata", ".sbss", ".tdata", ".tbss")  # name prefixes: .data.rel.ro too
 
 
-def in_own_code(address: int) -> bool:
-    """True inside the binary's own code: an executable segment, other than the PLT."""
-    segment = ida_segment.getseg(address)
-    return segment is not None and segment.type == ida_segment.SEG_CODE and not in_plt(address)
+class Region(Enum):
+    """Where in the binary an address lies, by the segment IDA made of its ELF section."""
 
+    OWN_CODE = auto()   # the binary's own code: an executable segment, other than the PLT
+    PLT = auto()        # the PLT stubs of imported functions
+    EXTERN = auto()     # IDA's extern segment, where it puts the imports
+    GOT = auto()        # the GOT, whose slots hold the addresses code loads
+    VARIABLES = auto()  # where global variables and string literals live
+    OTHER = auto()      # anywhere else, or outside every segment
 
-def in_plt(address: int) -> bool:
-    return _segment_name(address) in _PLT
+    @classmethod
+    def of(cls, address: int) -> Region:
+        segment = ida_segment.getseg(address)
+        if segment is None:
+            return cls.OTHER
+        name = ida_segment.get_segm_name(segment)
+        if name in _PLT:
+            return cls.PLT
+        if name in _GOT:
+            return cls.GOT
+        if name.startswith(_VARIABLES):
+            return cls.VARIABLES
+        if segment.type == ida_segment.SEG_XTRN:
+            return cls.EXTERN
+        return cls.OWN_CODE if segment.type == ida_segment.SEG_CODE else cls.OTHER
 
-
-def in_variables(address: int) -> bool:
-    """True inside a segment where global variables and string literals live."""
-    return (_segment_name(address) or "").startswith(_VARIABLES)
-
-
-def variable_segments() -> Iterator[ida_segment.segment_t]:
-    """Every segment where global variables and string literals live."""
-    for index in range(ida_segment.get_segm_qty()):
-        segment = ida_segment.getnseg(index)
-        if ida_segment.get_segm_name(segment).startswith(_VARIABLES):
-            yield segment
-
-
-def is_cell(address: int) -> bool:
-    """True for a cell that only holds a pointer for code to load: a GOT slot, or a data word inside code (an ARM literal pool)."""
-    return _segment_name(address) in _GOT or (in_own_code(address) and ida_bytes.is_data(ida_bytes.get_flags(address)))
-
-
-def _segment_name(address: int) -> str | None:
-    """The name of the segment `address` lies in: IDA names a segment after its ELF section."""
-    segment = ida_segment.getseg(address)
-    return ida_segment.get_segm_name(segment) if segment is not None else None
+    def segments(self) -> Iterator[ida_segment.segment_t]:
+        """Every segment in this region."""
+        for index in range(ida_segment.get_segm_qty()):
+            segment = ida_segment.getnseg(index)
+            if Region.of(segment.start_ea) is self:
+                yield segment

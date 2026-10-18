@@ -2,7 +2,7 @@ from __future__ import annotations
 import re
 from typing import Iterable, Mapping, Self
 from elfresolver.constraints import CalledBy, Calls, IDAConstraint, Matching, ReferencedBy, References
-from elfresolver.serializable import Serializable
+from elfresolver.protocol.serializable import Serializable
 
 
 class Symbol(Serializable):

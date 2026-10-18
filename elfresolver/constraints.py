@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
-from elfresolver.serializable import Serializable
+from elfresolver.protocol.serializable import Serializable
 if TYPE_CHECKING:
     from elfresolver.symbols import Function, Symbol
 

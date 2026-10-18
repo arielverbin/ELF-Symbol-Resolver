@@ -1,25 +1,26 @@
 from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator
+import ida_bytes # type: ignore
 import ida_nalt # type: ignore
 import ida_name # type: ignore
 import idautils # type: ignore
 from elfresolver.constraints import IDAConstraint
 from elfresolver.exceptions import ResolveInterrupted
-from elfresolver.ida.layout import is_cell
-from elfresolver.ida.names import demangled, name_forms
-from elfresolver.messages import ResolvedSymbol
+from elfresolver.ida.layout import Region
+from elfresolver.ida.names import SymName
+from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import Symbol
 
 if TYPE_CHECKING:
-    from elfresolver.ida.resolution import Resolution
+    from elfresolver.ida.resolution import SymbolResolution
 
 
 class IDASymbol(ABC):
     """A resolvable symbol, constructed from a ResolveRequest."""
 
-    def __init__(self, symbol: Symbol, resolution: Resolution) -> None:
+    def __init__(self, symbol: Symbol, resolution: SymbolResolution) -> None:
         self.symbol = symbol
         self._resolution = resolution
         self._matches: frozenset[int] | None = None
@@ -55,11 +56,11 @@ class IDASymbol(ABC):
 
     def references_to(self) -> Iterable[int]:
         """Every address referring to one of the matches."""
-        return data_refs_to(self.resolve())
+        return self._data_refs(idautils.DataRefsTo, self.resolve())
 
     def references_from(self) -> Iterable[int]:
         """Every address one of the matches refers to."""
-        return data_refs_from(self.resolve())
+        return self._data_refs(idautils.DataRefsFrom, self.resolve())
 
     # What this kind of symbol is.
 
@@ -76,9 +77,9 @@ class IDASymbol(ABC):
         """The symbol at `address`, as resolve() hands it to the user (see found)."""
 
     def names_of(self, address: int) -> tuple[str, ...]:
-        """Every name the symbol at `address` answers to: the forms of IDA's name for it (see name_forms), if it has one."""
+        """Every name the symbol at `address` answers to: the forms of IDA's name for it (see Name.forms), if it has one."""
         name = ida_name.get_name(address)
-        return name_forms(name, demangled_name(name)) if name else ()
+        return SymName(name).forms if name else ()
 
     def found(self, address: int, name: str | None, size: int) -> ResolvedSymbol:
         """This symbol, found at `address`, named `name` and `size` bytes long."""
@@ -100,25 +101,17 @@ class IDASymbol(ABC):
         # call the constaint method (i.e, `.calls`, `.matching` etc...)
         return frozenset(getattr(self, constraint.method)(*arguments))
 
-
-def demangled_name(name: str) -> str | None:
-    """`name` demangled as GNU's tools show it (see names.demangled); without a C++ runtime to, as IDA does."""
-    return demangled(name) or ida_name.demangle_name(name, 0)
-
-
-def data_refs_to(addresses: Iterable[int]) -> Iterator[int]:
-    """What refers to `addresses`, and what refers to the cells among those."""
-    for address in addresses:
-        for source in idautils.DataRefsTo(address):
-            yield source
-            if is_cell(source):
-                yield from idautils.DataRefsTo(source)
-
-
-def data_refs_from(addresses: Iterable[int]) -> Iterator[int]:
-    """What `addresses` refer to, and what the cells among those point at."""
-    for address in addresses:
-        for target in idautils.DataRefsFrom(address):
-            yield target
-            if is_cell(target):
-                yield from idautils.DataRefsFrom(target)
+    @staticmethod
+    def _data_refs(refs: Callable[[int], Iterable[int]], addresses: Iterable[int]) -> Iterator[int]:
+        """
+        The data references of `addresses` `refs` gives (idautils.DataRefsTo, or
+        DataRefsFrom), and those of the cells among them: a cell only holds an address
+        for code to load (a GOT slot, or a data word inside code: an ARM literal pool),
+        so what refers to a cell refers to what it points at.
+        """
+        for address in addresses:
+            for other in refs(address):
+                yield other
+                region = Region.of(other)
+                if region is Region.GOT or region is Region.OWN_CODE and ida_bytes.is_data(ida_bytes.get_flags(other)):
+                    yield from refs(other)

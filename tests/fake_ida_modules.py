@@ -309,8 +309,10 @@ def open(binary: FakeBinary, idb_path: Path | None = None) -> FakeIDA:
     for name, module in list(sys.modules.items()):
         if name.startswith("elfresolver.ida."):
             for value in vars(module).values():
-                if callable(getattr(value, "cache_clear", None)):
-                    value.cache_clear()
+                cached = [getattr(value, attribute, None) for attribute in vars(value)] if isinstance(value, type) else [value]
+                for function in cached:  # a module's functions, and its classes' (a static method's, as its class gives it)
+                    if callable(clear := getattr(function, "cache_clear", None)):
+                        clear()
     return _opened
 
 

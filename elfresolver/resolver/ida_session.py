@@ -9,9 +9,9 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
-from elfresolver.connection import Connection, Listener
+from elfresolver.protocol.connection import Connection, Listener
 from elfresolver.exceptions import ELFResolverError, IDAError, IDANotFoundError, IDAStartupError
-from elfresolver.messages import (
+from elfresolver.protocol.messages import (
     CancelRequest, FailureResponse, HelloResponse, IDALaunchEnv, IDARequest, IDAResponse, LogResponse, Message,
     ReadyResponse, ResolvedSymbol, ResolveRequest, ResolveResponse, ShutdownRequest,
 )

@@ -10,8 +10,8 @@ import struct
 import threading
 import pytest
 from elfresolver.symbols import Function, PLTEntry
-from elfresolver.connection import Connection, Listener
-from elfresolver.messages import CancelRequest, HelloResponse, ResolveRequest, ShutdownRequest
+from elfresolver.protocol.connection import Connection, Listener
+from elfresolver.protocol.messages import CancelRequest, HelloResponse, ResolveRequest, ShutdownRequest
 
 TOKEN = "0123abcd"
 

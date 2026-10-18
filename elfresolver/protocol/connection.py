@@ -4,7 +4,7 @@ import socket
 import struct
 import time
 from typing import Self
-from elfresolver.messages import Message
+from elfresolver.protocol.messages import Message
 
 _LOOPBACK = "127.0.0.1"
 _HEADER = struct.Struct(">I")

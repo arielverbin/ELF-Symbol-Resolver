@@ -2,7 +2,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass, field
 from typing import ClassVar, Mapping
-from elfresolver.serializable import Serializable
+from elfresolver.protocol.serializable import Serializable
 from elfresolver.symbols import Symbol
 
 

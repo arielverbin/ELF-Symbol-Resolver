@@ -6,7 +6,7 @@ token of its own; nothing but a Serializable is built from what arrives.
 import pytest
 from elfresolver import ResolvedSymbol
 from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
-from elfresolver.messages import (
+from elfresolver.protocol.messages import (
     CancelRequest, CancelResponse, FailureResponse, HelloResponse, IDALaunchEnv, LogResponse, Message,
     ReadyResponse, ResolveRequest, ResolveResponse, ShutdownRequest,
 )

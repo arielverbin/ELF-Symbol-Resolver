@@ -7,11 +7,11 @@ import ida_loader # type: ignore
 import idc # type: ignore
 from contextlib import contextmanager
 from typing import Callable, Generator, Mapping, Self
-from elfresolver.connection import Connection
+from elfresolver.protocol.connection import Connection
 from elfresolver.exceptions import ResolveInterrupted
-from elfresolver.ida.resolution import Resolution
-from elfresolver.ida.symbols.function import make_functions_of_thumb_pointers, separate_tail_called_functions
-from elfresolver.messages import (
+from elfresolver.ida.resolution import SymbolResolution
+from elfresolver.ida.symbols import IDAFunction
+from elfresolver.protocol.messages import (
     CancelRequest, CancelResponse, FailureResponse, HelloResponse, IDALaunchEnv, IDAResponse, LogResponse,
     ReadyResponse, ResolveRequest, ResolveResponse, ShutdownRequest,
 )
@@ -27,7 +27,7 @@ class Server:
         self._connection = connection
         self._launch = launch
         self._token = launch.token  # of the request being answered: the launch, until the resolver sends one
-        self._resolution = Resolution(interrupted=self._cancel_arrived)
+        self._resolution = SymbolResolution(interrupted=self._cancel_arrived)
 
     @classmethod
     def create(cls, environment: Mapping[str, str]) -> Self:
@@ -39,7 +39,7 @@ class Server:
         """Answer the launch, then every request until a shutdown, then hang up; the exit code to exit IDA with."""
         with self._connection:
             self._connection.send(HelloResponse(token=self._token))  # before any log record: the resolver expects it first
-            with _pipe_logs_to_session(self._connection, self._launch.log_level, token=lambda: self._token):
+            with self._logs_piped():
                 try:
                     self._wait_for_analysis()
                     self._connection.send(ReadyResponse(token=self._token))
@@ -91,15 +91,28 @@ class Server:
         logger.info("Waiting for IDA's auto-analysis")
         started = time.monotonic()
         ida_auto.auto_wait()
-        make_functions_of_thumb_pointers()
+        IDAFunction.make_functions_of_thumb_pointers()
         ida_auto.auto_wait()  # for the code those call
-        separate_tail_called_functions()
+        IDAFunction.separate_tail_called_functions()
         ida_auto.auto_wait()  # for the functions that made
         logger.info("Auto-analysis finished in %.1fs", time.monotonic() - started)
 
     def _save_database(self) -> None:
         """Write the database to its file, for the resolver to cache once IDA has exited."""
         ida_loader.save_database(idc.get_idb_path(), 0)
+
+    @contextmanager
+    def _logs_piped(self) -> Generator[None]:
+        """For the block, every elfresolver record from the launch's log level up is sent to the resolver too,
+        as part of the answer to the request under way."""
+        package_logger = logging.getLogger("elfresolver")
+        handler = ConnectionLogHandler(self._connection, token=lambda: self._token)
+        package_logger.addHandler(handler)
+        package_logger.setLevel(self._launch.log_level)
+        try:
+            yield
+        finally:
+            package_logger.removeHandler(handler)
 
 
 # Log handling: pipe logs to session
@@ -120,17 +133,3 @@ class ConnectionLogHandler(logging.Handler):
             )
         except Exception:
             self.handleError(record)
-
-
-@contextmanager
-def _pipe_logs_to_session(connection: Connection, level: int, token: Callable[[], str]) -> Generator[None]:
-    """For the block, every elfresolver record from `level` up is sent over `connection` too."""
-    package_logger = logging.getLogger("elfresolver")
-    handler = ConnectionLogHandler(connection, token)
-    package_logger.addHandler(handler)
-    package_logger.setLevel(level)
-    try:
-        yield
-    finally:
-        package_logger.removeHandler(handler)
-

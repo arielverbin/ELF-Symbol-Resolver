@@ -55,8 +55,8 @@ def test_symbols_with_other_constraints_differ():
 def test_repr_goes_one_level_deep_naming_the_symbols_in_it_by_their_ids():
     parser = Function().called_by(READER)
     symbol = GlobalVar().referenced_by(parser).matching("^g_")
-    assert repr(symbol) == f"GlobalVar({hex(id(symbol))}).referenced_by({hex(id(parser))}).matching('^g_')"
-    assert repr(parser) == f"Function({hex(id(parser))}).called_by({hex(id(READER))})"
+    assert repr(symbol) == f"GlobalVar({hex(id(symbol))}).referenced_by(source={hex(id(parser))}).matching(pattern='^g_')"
+    assert repr(parser) == f"Function({hex(id(parser))}).called_by(caller={hex(id(READER))})"
 
 
 def test_every_symbol_has_an_id_of_its_own():

@@ -8,7 +8,7 @@ import idautils # type: ignore
 from elfresolver.constraints import IDAConstraint
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.layout import is_cell
-from elfresolver.ida.names import name_forms
+from elfresolver.ida.names import demangled, name_forms
 from elfresolver.messages import ResolvedSymbol
 from elfresolver.symbols import Symbol
 
@@ -78,7 +78,7 @@ class IDASymbol(ABC):
     def names_of(self, address: int) -> tuple[str, ...]:
         """Every name the symbol at `address` answers to: the forms of IDA's name for it (see name_forms), if it has one."""
         name = ida_name.get_name(address)
-        return name_forms(name, ida_name.demangle_name(name, 0)) if name else ()
+        return name_forms(name, demangled_name(name)) if name else ()
 
     def found(self, address: int, name: str | None, size: int) -> ResolvedSymbol:
         """This symbol, found at `address`, named `name` and `size` bytes long."""
@@ -99,6 +99,11 @@ class IDASymbol(ABC):
 
         # call the constaint method (i.e, `.calls`, `.matching` etc...)
         return frozenset(getattr(self, constraint.method)(*arguments))
+
+
+def demangled_name(name: str) -> str | None:
+    """`name` demangled as GNU's tools show it (see names.demangled); without a C++ runtime to, as IDA does."""
+    return demangled(name) or ida_name.demangle_name(name, 0)
 
 
 def data_refs_to(addresses: Iterable[int]) -> Iterator[int]:

@@ -47,7 +47,7 @@ nest them.
 |-------------|----------------------------------------------------------------------------------|
 | `Function`  | a function of the binary's own code                                             |
 | `PLTEntry`  | an imported function's PLT stub, named by the import's demangled name (a `Function` too) |
-| `GlobalVar` | a data item where variables live (`.data`, `.bss`, `.rodata`, ...), other than a string |
+| `GlobalVar` | a data item where variables live (`.data`, `.bss`, `.rodata`, ...), other than a string: as IDA typed it (see below) |
 | `String`    | a NUL-terminated string literal, named by its text                               |
 
 | Constraint                | On          | Holds when the symbol...                                            |
@@ -91,14 +91,46 @@ still describes one thing.
 
 Architectures don't matter to a symbol. Calls and references are normalized inside IDA:
 
-- a tail jump (`-O2`) is a call, and a local thunk is seen through
-- PIC code reaching a global through its GOT slot references the global
-- ARM loading an address from a literal pool references what the pool holds
+- a tail jump (`-O2`) is a call, and a local thunk is seen through: so is the PLT stub a
+  shared object calls its own exported functions through, and ARM's Thumb entry to a stub
+- i686's PC thunk (`__x86.get_pc_thunk.bx`), which PIC code calls for its own address, is no call
+- a function IDA folded into a caller that only tail-jumps to it (aarch64 at `-O2`) is one of its own
+- PIC code reaching a global through its GOT slot references the global, and taking an import's
+  address references its `PLTEntry`
+- ARM loading an address from a literal pool references what the pool holds; a Thumb function's
+  pointer (its address plus one) references the function, and on 32-bit ARM, code only such a
+  pointer leads to (`main`, which `_start` loads from the GOT) is made a function
 - PLT stubs are found in `.plt`, `.plt.sec` (`-fcf-protection`) and `.plt.got`
 
+C++ names are demangled as GNU's tools show them (`nm -C`, `c++filt`), whatever IDA's own
+demangler says: `geo::Box<int>::area() const`, `{lambda(int)#1}`. A name answers to its forms
+without its return type (a template's), without its ABI tags, and without its parameters too:
+`Function("geo::scale")` matches every overload, `Function("geo::scale(geo::Point, double)")`
+one. A stripped executable has no names of its own functions, but a shared object keeps those
+it exports, and every C++ binary keeps its classes' typeinfo names (`String("N3geo7PolygonE")`).
+
 Strings are read from the binary's bytes, not from IDA's string list: a literal is the
-printable text between two NULs. A name is matched whole: `String("input")` doesn't match
-`"enter input"`, while `String().matching("input$")` does.
+printable text between two NULs, or starting where something refers to it (the tail the linker
+merged into a longer literal: `"input"` in `"enter input"`). A name is matched whole:
+`String("input")` doesn't match `"enter input"`, while `String().matching("input$")` does.
+
+A `GlobalVar` is a data item as IDA typed it, and in a stripped binary IDA types data as code
+uses it: a struct whose fields are read may be one item per field, and an array of pointers
+(a vtable, a table of handlers) one item per pointer. `GlobalVar().references(handler)` finds
+the slot holding the handler's pointer, inside the table; `resolve_all()` gets every item a
+function reads.
+
+### Known limitations
+
+- **Thread-locals** aren't found: code reaches one through the thread pointer and its offset in
+  the TLS block (`fs:-4`, `tpidr_el0`), which IDA cross-references to nothing.
+- **Section anchors**: GCC's `-O2` reaches ARM's statics as the first static of their section,
+  plus an offset. IDA refers to that first static, and not always to the static used.
+- **One item per pointer**: following a table from one of its slots (`Function().referenced_by(
+  GlobalVar().references(handler))`) finds the functions that slot points at, not the whole
+  table's. ARM's tables, vtables and typeinfo get this; x86's tables are usually one item.
+- **Biased pointers**: a loop counting from 1 may refer to its array minus one element, which
+  is what `GlobalVar().referenced_by(loop)` finds.
 
 ---
 
@@ -158,11 +190,27 @@ modules over a made-up binary (`tests/fake_ida_modules.py`). A stand-in `idat`
 (`tests/fake_idat.py`) runs the real `bootstrap.py` on them, so the whole path is exercised for
 real: the process, the connection, IDA's kinds of symbols, logs, errors, cancellation and the cache.
 
-The tests marked `ida` run the real IDA, found through `$IDADIR`. They build `tests/server.c` for
-x86-64 (`-O0`, `-O2`, `-no-pie`, a shared object), i686, aarch64 and armhf, strip each build,
-and check that the same symbols resolve in all of them to the addresses in the unstripped build's
-symbol table. A build whose compiler isn't installed is skipped. On Debian/Ubuntu:
-`sudo apt-get install gcc-x86-64-linux-gnu gcc-i686-linux-gnu gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf`.
+The tests marked `ida` run the real IDA, found through `$IDADIR`. Each module holds programs as
+source, which `tests/real_ida.py` builds for x86-64 (`-O0`, `-O2`, `-O3`, `-no-pie`), i686, aarch64
+and armhf, or as shared objects, strips, and opens in IDA once per module. A test checks that its
+symbols resolve to the addresses in the unstripped build's symbol table (`nm -C`), on every build:
+
+| Module                         | Program                                                                 |
+|--------------------------------|-------------------------------------------------------------------------|
+| `test_ida.py`                  | a C++ server: exceptions, virtual functions, thunks, lambdas, templates, statics |
+| `test_ida_cpp_library.py`      | a C++ shared object: exported names, overloads, operators, calls through its own PLT |
+| `test_ida_c.py`                | the server above in C, and C control flow: tail calls, cold paths, inlining, merged literals |
+| `test_ida_c_data.py`           | C data: tables of functions and strings, structs, lists, switch tables  |
+
+A known limitation is marked as an expected failure where it applies, so a fix shows as XPASS.
+A build whose compiler isn't installed is skipped. The compilers are looked up by target triplet
+(`aarch64-linux-gnu-g++`, ...), with their `strip` and `nm`. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install {gcc,g++}-{x86-64-linux-gnu,i686-linux-gnu,aarch64-linux-gnu,arm-linux-gnueabihf}
+```
+
+On macOS, wrappers on `PATH` named the same, running a Linux VM's compilers, work as well.
 
 ---
 

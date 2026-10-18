@@ -10,7 +10,7 @@ from typing import Callable, Generator, Mapping, Self
 from elfresolver.connection import Connection
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.resolution import Resolution
-from elfresolver.ida.symbols.function import separate_tail_called_functions
+from elfresolver.ida.symbols.function import make_functions_of_thumb_pointers, separate_tail_called_functions
 from elfresolver.messages import (
     CancelRequest, CancelResponse, FailureResponse, HelloResponse, IDALaunchEnv, IDAResponse, LogResponse,
     ReadyResponse, ResolveRequest, ResolveResponse, ShutdownRequest,
@@ -84,10 +84,15 @@ class Server:
         )
 
     def _wait_for_analysis(self) -> None:
-        """Return once IDA's auto-analysis of the open database has finished, and its functions are each one of their own."""
+        """
+        Return once IDA's auto-analysis of the open database has finished: with a function
+        wherever a pointer leads to one, and each function one of its own.
+        """
         logger.info("Waiting for IDA's auto-analysis")
         started = time.monotonic()
         ida_auto.auto_wait()
+        make_functions_of_thumb_pointers()
+        ida_auto.auto_wait()  # for the code those call
         separate_tail_called_functions()
         ida_auto.auto_wait()  # for the functions that made
         logger.info("Auto-analysis finished in %.1fs", time.monotonic() - started)

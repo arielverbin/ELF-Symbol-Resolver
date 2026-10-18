@@ -10,6 +10,7 @@ import idautils # type: ignore
 from elfresolver.ida.layout import in_plt
 from elfresolver.ida.names import name_forms
 from elfresolver.ida.symbols.function import IDAFunction, entry_of
+from elfresolver.ida.symbols.symbol import data_refs_to, demangled_name
 from elfresolver.messages import ResolvedSymbol
 
 
@@ -19,6 +20,13 @@ class IDAPLTEntry(IDAFunction):
     def calls_from(self) -> Iterator[int]:
         """Nothing: a stub only jumps to its import, which is no function of the binary's own."""
         return iter(())
+
+    def references_to(self) -> Iterator[int]:
+        """
+        Every address referring to one of the matches: to its stub, or to its import
+        (PIC code taking an import's address loads it from the GOT, whose slot points at the import).
+        """
+        return data_refs_to(address for stub in self.resolve() for address in (stub, _imports()[stub].address))
 
     def references_from(self) -> Iterator[int]:
         """Nothing: a stub only loads its import's GOT slot."""
@@ -43,7 +51,8 @@ class IDAPLTEntry(IDAFunction):
 
 @dataclass(frozen=True)
 class _Import:
-    """The import a PLT stub jumps to: its name as linked (with no version), and demangled, if it is mangled."""
+    """The import a PLT stub jumps to: where IDA put it, its name as linked (with no version), and demangled, if it is mangled."""
+    address: int
     name: str
     demangled: str | None
 
@@ -55,7 +64,7 @@ def _imports() -> dict[int, _Import]:
     for stub in (entry for entry in idautils.Functions() if in_plt(entry)):
         if (target := _import_of(stub)) is not None:
             name = without_version(ida_name.get_name(target)).removeprefix("__imp_")  # IDA's ARM import names have it
-            imports[stub] = _Import(name, ida_name.demangle_name(name, 0))
+            imports[stub] = _Import(target, name, demangled_name(name))
     return imports
 
 

@@ -78,7 +78,7 @@ class FakeIDA:
     BADADDR = 0xFFFFFFFFFFFFFFFF
     SEG_XTRN, SEG_CODE, SEG_DATA = 1, 2, 3
     FUNC_THUNK = 0x80
-    fl_CF, fl_CN, fl_JF, fl_JN = 16, 17, 18, 19
+    fl_CF, fl_CN, fl_JF, fl_JN, fl_F = 16, 17, 18, 19, 21
     dr_O = 1
     segment_t = Segment
 
@@ -119,6 +119,14 @@ class FakeIDA:
     def qexit(self, code: int) -> None:
         raise SystemExit(code)
 
+    # ida_ida
+
+    def inf_get_procname(self) -> str:
+        return "metapc"
+
+    def inf_is_64bit(self) -> bool:
+        return True
+
     # ida_segment
 
     def getseg(self, ea: int) -> Segment | None:
@@ -138,16 +146,16 @@ class FakeIDA:
     def get_flags(self, ea: int) -> int:
         item = self._items.get(ea)
         referred = any(xref.to == ea for xref in self._xrefs)
-        return (item.flags if item is not None else 0) | (_XREF if referred else 0)
+        return (item.flags & ~_VALUE if item is not None else 0) | (_XREF if referred else 0)  # as IDA 9's: no byte value
 
     def is_data(self, flags: int) -> bool:
         return bool(flags & _DATA)
 
+    def is_unknown(self, flags: int) -> bool:
+        return not flags & (_CODE | _DATA)
+
     def is_strlit(self, flags: int) -> bool:
         return bool(flags & _STRLIT)
-
-    def has_value(self, flags: int) -> bool:
-        return bool(flags & _VALUE)
 
     def has_xref(self, flags: int) -> bool:
         return bool(flags & _XREF)
@@ -165,8 +173,8 @@ class FakeIDA:
         return item.size if item is not None else 1
 
     def is_loaded(self, ea: int) -> bool:
-        segment = self.getseg(ea)
-        return segment is not None and segment.type != self.SEG_XTRN
+        segment, item = self.getseg(ea), self._item_at(ea)
+        return segment is not None and segment.type != self.SEG_XTRN and (item is None or bool(item.flags & _VALUE))
 
     def get_bytes(self, ea: int, size: int) -> bytes | None:
         segment = self.getseg(ea)
@@ -210,6 +218,9 @@ class FakeIDA:
     def Chunks(self, entry: int) -> list[tuple[int, int]]:
         function = self.get_func(entry)
         return [(function.start_ea, function.end_ea)] if function is not None else []
+
+    def Names(self) -> list[tuple[int, str]]:
+        return sorted((address, item.name) for address, item in self._items.items() if item.name)
 
     def Heads(self, start: int, end: int) -> list[int]:
         return sorted(head for head in self._items if start <= head < end)
@@ -262,18 +273,19 @@ class FakeIDA:
 _MODULES = {
     "ida_auto": ["auto_wait"],
     "ida_bytes": [
-        "get_flags", "is_data", "is_strlit", "has_value", "has_xref",
+        "get_flags", "is_data", "is_unknown", "is_strlit", "has_xref",
         "get_item_head", "get_item_end", "get_item_size", "is_loaded", "get_bytes",
     ],
     "ida_funcs": ["get_func", "get_func_name", "calc_func_size", "calc_thunk_func_target", "FUNC_THUNK"],
+    "ida_ida": ["inf_get_procname", "inf_is_64bit"],
     "ida_idaapi": ["BADADDR"],
     "ida_loader": ["save_database"],
     "ida_nalt": ["get_imagebase"],
     "ida_name": ["get_name", "demangle_name"],
     "ida_pro": ["qexit"],
     "ida_segment": ["getseg", "get_segm_name", "get_segm_qty", "getnseg", "segment_t", "SEG_CODE", "SEG_DATA", "SEG_XTRN"],
-    "ida_xref": ["fl_CF", "fl_CN", "fl_JF", "fl_JN", "dr_O"],
-    "idautils": ["Functions", "Chunks", "Heads", "XrefsFrom", "XrefsTo", "DataRefsFrom", "DataRefsTo"],
+    "ida_xref": ["fl_CF", "fl_CN", "fl_JF", "fl_JN", "fl_F", "dr_O"],
+    "idautils": ["Functions", "Chunks", "Heads", "Names", "XrefsFrom", "XrefsTo", "DataRefsFrom", "DataRefsTo"],
     "idc": ["get_idb_path"],
 }
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import functools
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 import ida_bytes # type: ignore
 from elfresolver.ida.layout import variable_segments
 from elfresolver.ida.symbols.symbol import IDASymbol
@@ -10,9 +10,8 @@ from elfresolver.messages import ResolvedSymbol
 class IDAString(IDASymbol):
     """A NUL-terminated string literal, named by its text."""
 
-    def all(self) -> Iterator[int]:
-        for start, data in _contents():
-            yield from (start + offset for offset, _ in c_strings(data))
+    def all(self) -> Iterable[int]:
+        return _literals().keys()
 
     def owners(self, addresses: Iterable[int]) -> Iterator[int]:
         return (address for address in addresses if _text_at(address) is not None)
@@ -26,12 +25,19 @@ class IDAString(IDASymbol):
         return self.found(address, text, len(text.encode()) + 1)
 
 
-def c_strings(data: bytes) -> Iterator[tuple[int, str]]:
-    """Every C string literal in `data`: its offset and its text (see c_string_at)."""
+def c_strings(data: bytes, referenced: Callable[[int], bool] = lambda offset: False) -> Iterator[tuple[int, str]]:
+    """Every C string literal in `data`: its offset and its text, printable UTF-8 a
+    NUL ends. One starts after a NUL; or inside a run of text, at an offset
+    `referenced` says something refers to. A linker merges a literal into the
+    tail of a longer one, and a literal may follow other data with no NUL
+    between: a double ending in 0x40 makes an '@' of it."""
     start = 0
     while (end := data.find(b"\0", start)) >= 0:
         if (text := _printable(data[start:end])) is not None:
             yield start, text
+        for inner in range(start + 1, end):
+            if referenced(inner) and (text := _printable(data[inner:end])) is not None:
+                yield inner, text
         start = end + 1
 
 
@@ -47,6 +53,16 @@ def _text_at(address: int) -> str | None:
         if start <= address < start + len(data):
             return c_string_at(data, address - start)
     return None
+
+
+@functools.cache  # one IDA has one database open
+def _literals() -> dict[int, str]:
+    """Every C string literal where variables live, by its address (see c_strings)."""
+    return {
+        start + offset: text
+        for start, data in _contents()
+        for offset, text in c_strings(data, referenced=lambda offset, start=start: ida_bytes.has_xref(ida_bytes.get_flags(start + offset)))
+    }
 
 
 @functools.cache  # one IDA has one database open

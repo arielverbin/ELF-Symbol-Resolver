@@ -35,6 +35,19 @@ def test_c_strings_are_printable_runs_ending_in_a_nul():
     assert list(c_strings(RODATA)) == [(3, "enter input"), (15, "%s: %d\n")]
 
 
+def test_a_literal_starts_inside_a_run_of_text_where_something_refers_to_it():
+    """A merged tail ('input' in 'enter input'), or text right after data with no NUL between (a double's '@')."""
+    data = b"\0\x00\x00\x00@N3geo7PolygonE\0enter input\0"
+    referenced = {5, 26}.__contains__
+    assert list(c_strings(data, referenced)) == [(4, "@N3geo7PolygonE"), (5, "N3geo7PolygonE"), (20, "enter input"), (26, "input")]
+
+
+def test_a_literal_after_unprintable_bytes_is_found_where_something_refers_to_it():
+    data = b"\x01\x02text\0"
+    assert list(c_strings(data)) == []
+    assert list(c_strings(data, {2}.__contains__)) == [(2, "text")]
+
+
 def test_c_string_at_reads_from_any_offset():
     assert c_string_at(RODATA, 3) == "enter input"
     assert c_string_at(RODATA, 9) == "input"   # the tail of a longer literal

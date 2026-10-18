@@ -1,13 +1,16 @@
 from __future__ import annotations
 import logging
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 import ida_bytes # type: ignore
 import ida_funcs # type: ignore
+import ida_ida # type: ignore
 import ida_idaapi # type: ignore
+import ida_segment # type: ignore
 import ida_xref # type: ignore
 import idautils # type: ignore
-from elfresolver.ida.layout import in_own_code
-from elfresolver.ida.symbols.symbol import IDASymbol, data_refs_from
+import idc # type: ignore
+from elfresolver.ida.layout import in_own_code, in_plt
+from elfresolver.ida.symbols.symbol import IDASymbol, data_refs_from, data_refs_to
 from elfresolver.messages import ResolvedSymbol
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,10 @@ class IDAFunction(IDASymbol):
         """Every function the matches call or tail-jump to, past any local thunks."""
         return _callees(_heads_of(self.resolve()))
 
+    def references_to(self) -> Iterator[int]:
+        """Every address referring to one of the matches: to its entry, or one past it (a Thumb function's pointer has its low bit set)."""
+        return data_refs_to(address for entry in self.resolve() for address in dict.fromkeys([entry, entry | 1]))
+
     def references_from(self) -> Iterator[int]:
         """Every address the matches refer to, from any of their instructions (or the data inside them: an ARM literal pool)."""
         return data_refs_from(_heads_of(self.resolve()))
@@ -65,25 +72,55 @@ def is_entry(address: int) -> bool:
     return entry_of(address) == address
 
 
+def make_functions_of_thumb_pointers() -> None:
+    """Let IDA explore skipped bytes due to Thumb code (32-bit ARM, where such a
+    pointer is the address plus one). It solves an issue where IDA doesn't follow main's,
+    which _start loads from the GOT: without this, main is no function, and neither is
+    any function only main calls."""
+    if ida_ida.inf_get_procname() != "ARM" or ida_ida.inf_is_64bit():
+        return
+    for segment in map(ida_segment.getnseg, range(ida_segment.get_segm_qty())):
+        if segment.type in (ida_segment.SEG_CODE, ida_segment.SEG_XTRN):
+            continue
+        for head in idautils.Heads(segment.start_ea, segment.end_ea):
+            for target in idautils.DataRefsFrom(head):
+                entry = target - 1
+                if target & 1 and in_own_code(entry) and ida_bytes.is_unknown(ida_bytes.get_flags(entry)):
+                    idc.split_sreg_range(entry, "T", 1, idc.SR_user)
+                    if ida_funcs.add_func(entry):
+                        logger.debug("Made a Thumb function of %#x, which %#x points at", entry, head)
+
+
 def separate_tail_called_functions() -> None:
-    """
-    Make a function of its own of every function IDA folded into its caller, as one
-    of its chunks, because the caller only ever tail-jumps to it (aarch64 at -O2:
-    read_request ends in `b parse_request`). Such a chunk is where the jump ending
-    another chunk of the same function lands. Once separate, that jump is a tail call.
-    """
+    """Treat tail-called functions as separate functions instead of a chunk.
+
+    Tail-called functions are called using an unconditional jump from another chunk,
+    without pushing a return address - so a return on the tail-called function exists
+    both the tail-called function and its caller together."""
     for entry in list(idautils.Functions()):
         chunks = list(idautils.Chunks(entry))
-        if len(chunks) < 2:
-            continue
-        tails = {start for start, _ in chunks} - {entry}
         for start, end in chunks:
-            if not (heads := list(idautils.Heads(start, end))):
+            others = [chunk for chunk in chunks if chunk != (start, end)]
+            in_others = lambda address, others=others: any(begin <= address < finish for begin, finish in others)
+            if start == entry or not _tail_jumped_into(start, in_others) or _jumps_into(start, end, in_others):
                 continue
-            for xref in idautils.XrefsFrom(heads[-1]):
-                if xref.type in _JUMPS and xref.to in tails and ida_funcs.remove_func_tail(ida_funcs.get_func(entry), xref.to):
-                    ida_funcs.add_func(xref.to)
-                    logger.debug("Made a function of %#x, which IDA had folded into %#x", xref.to, entry)
+            if ida_funcs.remove_func_tail(ida_funcs.get_func(entry), start):
+                ida_funcs.add_func(start)
+                logger.debug("Made a function of %#x, which IDA had folded into %#x", start, entry)
+
+
+def _tail_jumped_into(start: int, source: Callable[[int], bool]) -> bool:
+    """True if an unconditional jump (one nothing flows on from) from where `source` holds lands on `start`."""
+    return any(
+        xref.type in _JUMPS and source(xref.frm)
+        and not any(flow.type == ida_xref.fl_F for flow in idautils.XrefsFrom(xref.frm))
+        for xref in idautils.XrefsTo(start)
+    )
+
+
+def _jumps_into(start: int, end: int, target: Callable[[int], bool]) -> bool:
+    """True if the code between `start` and `end` jumps to where `target` holds."""
+    return any(xref.type in _JUMPS and target(xref.to) for head in idautils.Heads(start, end) for xref in idautils.XrefsFrom(head))
 
 
 def _heads_of(entries: Iterable[int]) -> Iterator[int]:
@@ -94,17 +131,17 @@ def _heads_of(entries: Iterable[int]) -> Iterator[int]:
 
 
 def _callers(entries: Iterable[int]) -> Iterator[int]:
-    """The code calling or tail-jumping to the functions at `entries`, directly or through a local thunk."""
+    """The code calling or tail-jumping to the functions at `entries`, directly or through a thunk (see _thunk_at)."""
     for entry in entries:
         for xref in idautils.XrefsTo(entry):
             if _is_call(xref):
                 yield xref.frm
-                if (thunk := _local_thunk_at(xref.frm)) is not None:
+                if (thunk := _thunk_at(xref.frm)) is not None:
                     yield from _callers([thunk])
 
 
 def _callees(addresses: Iterable[int]) -> Iterator[int]:
-    """The functions the code at `addresses` calls or tail-jumps to, past any local thunks."""
+    """The functions the code at `addresses` calls or tail-jumps to, past any thunks (see _thunk_at)."""
     for address in addresses:
         for xref in idautils.XrefsFrom(address):
             if _is_call(xref):
@@ -130,9 +167,9 @@ def _is_pc_thunk(address: int) -> bool:
 
 
 def _past_thunks(address: int) -> int:
-    """Where a call to `address` ends up: past the local thunks (`j_foo`) on the way."""
+    """Where a call to `address` ends up: past the thunks on the way (see _thunk_at)."""
     for _ in range(_LONGEST_THUNK_CHAIN):
-        if _local_thunk_at(address) != address:
+        if _thunk_at(address) != address:
             break
         target, _ = ida_funcs.calc_thunk_func_target(ida_funcs.get_func(address))
         if target == ida_idaapi.BADADDR:
@@ -141,9 +178,19 @@ def _past_thunks(address: int) -> int:
     return address
 
 
-def _local_thunk_at(address: int) -> int | None:
-    """The entry of the function `address` belongs to, if that is a thunk in the binary's own code (`j_foo`, not a PLT stub)."""
+def _thunk_at(address: int) -> int | None:
+    """
+    The entry of the function `address` belongs to, if that is a thunk on the way:
+    a local thunk (`j_foo`); the PLT stub a shared object calls its own exported
+    functions through (a call to one may be interposed); or the Thumb entry an ARM
+    PLT stub has before it, for Thumb code to tail-jump to. An import's own stub
+    is none: it is the PLTEntry a call reaches.
+    """
     function = ida_funcs.get_func(address)
-    if function is None or not function.flags & ida_funcs.FUNC_THUNK or not in_own_code(function.start_ea):
+    if function is None or not function.flags & ida_funcs.FUNC_THUNK:
         return None
-    return function.start_ea
+    if in_own_code(function.start_ea):
+        return function.start_ea
+    target, _ = ida_funcs.calc_thunk_func_target(function)
+    on_the_way = target != ida_idaapi.BADADDR and (in_own_code(target) or in_plt(target))
+    return function.start_ea if on_the_way else None

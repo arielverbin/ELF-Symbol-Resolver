@@ -15,8 +15,11 @@ class IDAConstraint(Serializable):
 
     def __str__(self) -> str:
         from elfresolver.symbols import Symbol  # symbols.py imports this module
-        (argument,) = vars(self).values()  # each holds one value: its method's argument
-        return f".{self.method}({argument.id if isinstance(argument, Symbol) else repr(argument)})"
+        arguments = ", ".join(  # joined apart from the f-string below: quotes nested in one need Python 3.12
+            f"{name}={argument.id if isinstance(argument, Symbol) else repr(argument)}"
+            for name, argument in vars(self).items() if name != self.method
+        )
+        return f".{self.method}({arguments})"
 
 
 @dataclass(frozen=True)
@@ -52,3 +55,12 @@ class ReferencedBy(IDAConstraint):
     """`source` refers to the symbol's address."""
     source: Symbol
     method: ClassVar[str] = "referenced_by"
+
+
+# WIP
+@dataclass(frozen=True)
+class StructuredWith(IDAConstraint):
+    """The function is implemented with a specified number of loop and if statements."""
+    loops: int | None
+    ifs: int | None
+    method: ClassVar[str] = "structured_with"

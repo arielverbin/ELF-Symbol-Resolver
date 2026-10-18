@@ -6,13 +6,16 @@ the stand-ins for IDA's modules (see fakes.example_binary and fake_ida_modules.p
   * A name is matched whole, and literally.
   * A symbol met again, alone or nested in another, is answered from memory.
   * An interrupted resolve raises ResolveInterrupted, and isn't remembered.
+  * A variable holding a function's pointer is found by it, and finds it.
 """
 import logging
 import pytest
+import fake_ida_modules
 from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 from elfresolver import ResolvedSymbol
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.resolution import Resolution
+from fakes import FakeBinary
 
 RECVFROM, PUTS, PROMPT, SERVED = 0x401030, 0x401040, 0x402004, 0x404010
 PARSE, READ, OTHER_PROMPTER, MAIN = 0x401200, 0x401300, 0x401400, 0x401500
@@ -113,3 +116,15 @@ def test_the_log_follows_the_recursion(resolution, caplog):
         f"{reader!r}: 1 match(es)",
     ]
     assert f"{reader!r}: 1 match(es), resolved before" in caplog.messages[6:]
+
+
+@pytest.mark.parametrize("entry", [0x401140, 0x401141], ids=["even", "odd"])
+def test_a_variable_holding_a_functions_pointer_is_found_by_it_and_finds_it(entry):
+    """At -O0, x86's functions start anywhere, an odd address too: a pointer to one is still no jump table's (whose case addresses lie inside functions)."""
+    binary = FakeBinary(image_base=0x400000)
+    hook = binary.function(entry)
+    pointer = binary.global_var(0x404010, "exit_hook", references=[hook])
+    fake_ida_modules.open(binary)
+    resolution = Resolution()
+    assert resolution.of(GlobalVar().references(Function())).resolve() == {pointer}
+    assert resolution.of(Function().referenced_by(GlobalVar("exit_hook"))).resolve() == {hook}

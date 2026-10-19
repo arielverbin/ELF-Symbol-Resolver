@@ -10,6 +10,7 @@ from elfresolver.ida.layout import Region
 from elfresolver.ida.names import SymName
 from elfresolver.ida.symbols.function import IDAFunction
 from elfresolver.protocol.messages import ResolvedSymbol
+from elfresolver.symbols import PLTEntry
 
 
 @dataclass(frozen=True)
@@ -19,10 +20,10 @@ class _Import:
     name: SymName
 
 
-class IDAPLTEntry(IDAFunction):
+class IDAPLTEntry(IDAFunction, kind=PLTEntry):
     """The PLT stub of an imported function, named by the import's demangled name: in full, or without its parameter list."""
 
-    def calls_from(self) -> Iterator[int]:
+    def calls_from(self, entries: Iterable[int]) -> Iterator[int]:
         """Nothing: a stub only jumps to its import, which is no function of the binary's own."""
         return iter(())
 

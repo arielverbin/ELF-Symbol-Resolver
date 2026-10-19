@@ -1,16 +1,22 @@
 from __future__ import annotations
+import functools
+import itertools
 import logging
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 import ida_bytes # type: ignore
 import ida_funcs # type: ignore
 import ida_ida # type: ignore
 import ida_idaapi # type: ignore
+import ida_ua # type: ignore
 import ida_xref # type: ignore
 import idautils # type: ignore
 import idc # type: ignore
 from elfresolver.ida.layout import Region
+from elfresolver.ida.structure import Structure
+from elfresolver.constraints import Count
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.protocol.messages import ResolvedSymbol
+from elfresolver.symbols import Function
 
 logger = logging.getLogger(__name__)
 
@@ -20,22 +26,37 @@ _LONGEST_THUNK_CHAIN = 8  # thunks of thunks followed, at most: never round in c
 _PC_THUNK_REGISTERS = (0x04, 0x0C, 0x14, 0x1C, 0x2C, 0x34, 0x3C)  # ModRM bytes of `mov eax..edi, [esp]`
 
 
-class IDAFunction(IDASymbol):
+class IDAFunction(IDASymbol, kind=Function):
     """A function of the binary's own code (an import's PLT stub is an IDAPLTEntry)."""
 
-    def calls(self, callee: IDAFunction) -> Iterable[int]:
-        """The functions calling `callee`: directly, by a tail jump, or through a thunk on the way."""
-        return self.owners(callee.calls_to())
+    def calls(self, callee: IDAFunction, max_depth: int | None = 1) -> Iterable[int]:
+        """The functions calling `callee` (directly, by a tail jump, or through a thunk on the way), or calling one that does, `max_depth` deep."""
+        callers = lambda entries: {entry for call in callee.calls_to(entries) if (entry := self.function_of(call)) is not None}
+        return self.owners(self._reached(callee.resolve(), callers, max_depth))
 
-    def called_by(self, caller: IDAFunction) -> Iterable[int]:
-        """The functions `caller` calls or tail-jumps to, past the thunks on the way."""
-        return self.owners(caller.calls_from())
+    def called_by(self, caller: IDAFunction, max_depth: int | None = 1) -> Iterable[int]:
+        """The functions `caller` calls or tail-jumps to (past the thunks on the way), or that those call, `max_depth` deep."""
+        return self.owners(self._reached(caller.resolve(), caller.calls_from, max_depth))
 
-    # What calls the matches, and what they call and refer to: from any of their instructions.
+    @IDASymbol.heavy
+    def uses_const(self, value: int, *, candidates: frozenset[int]) -> Iterator[int]:
+        """The candidates using `value` (see _constants_of), as wide as any operand it fits: -1 is 0xFF in a byte, 0xFFFFFFFF in a dword."""
+        forms = {value & (1 << 8 * width) - 1 for width in (1, 2, 4, 8) if -(1 << 8 * width - 1) <= value < 1 << 8 * width}
+        return (entry for entry in self._each(candidates) if forms & self._constants_of(entry))
 
-    def calls_to(self) -> Iterator[int]:
-        """Every instruction calling one of the matches: directly, by a tail jump, or through a thunk on the way (see _thunk_at)."""
-        callees = list(self.resolve())
+    @IDASymbol.heavy
+    def structured_with(self, loops: Count | None, ifs: Count | None, switch_cases: Count | None, *, candidates: frozenset[int]) -> Iterator[int]:
+        """The candidates whose decompiled code has loops, ifs and switch cases in these counts (see Structure)."""
+        return (
+            entry for entry in self._each(candidates)
+            if (structure := Structure.of(entry)) is not None and structure.has(loops, ifs, switch_cases)
+        )
+
+    # What calls functions, and what they call and refer to: from any of their instructions.
+
+    def calls_to(self, entries: Iterable[int]) -> Iterator[int]:
+        """Every instruction calling one of the functions at `entries`: directly, by a tail jump, or through a thunk on the way (see _thunk_at)."""
+        callees = list(entries)
         while callees:
             for xref in idautils.XrefsTo(callees.pop()):
                 if self._is_call(xref):
@@ -43,9 +64,9 @@ class IDAFunction(IDASymbol):
                     if (thunk := self._thunk_at(xref.frm)) is not None:
                         callees.append(thunk)  # what calls the thunk calls the callee too
 
-    def calls_from(self) -> Iterator[int]:
-        """Every function the matches call or tail-jump to, past the thunks on the way (see _thunk_at)."""
-        for xref in (xref for head in self._iter_function_heads() for xref in idautils.XrefsFrom(head)):
+    def calls_from(self, entries: Iterable[int]) -> Iterator[int]:
+        """Every function the functions at `entries` call or tail-jump to, past the thunks on the way (see _thunk_at)."""
+        for xref in (xref for head in self._iter_function_heads(entries) for xref in idautils.XrefsFrom(head)):
             if not self._is_call(xref):
                 continue
             callee = xref.to
@@ -65,7 +86,7 @@ class IDAFunction(IDASymbol):
 
     def references_from(self) -> Iterator[int]:
         """Every address the matches refer to, from any of their instructions (or the data inside them: an ARM literal pool)."""
-        return self._data_refs(idautils.DataRefsFrom, self._iter_function_heads())
+        return self._data_refs(idautils.DataRefsFrom, self._iter_function_heads(self.resolve()))
 
     def all(self) -> Iterable[int]:
         return (entry for entry in idautils.Functions() if Region.of(entry) is Region.OWN_CODE)
@@ -78,11 +99,45 @@ class IDAFunction(IDASymbol):
     def describe(self, entry: int) -> ResolvedSymbol:
         return self.found(entry, ida_funcs.get_func_name(entry), ida_funcs.calc_func_size(ida_funcs.get_func(entry)))
 
-    def _iter_function_heads(self) -> Iterator[int]:
-        """Every head of the matches, in all their chunks: their instructions, and the data inside them."""
-        for entry in self.resolve():
+    @staticmethod
+    def _iter_function_heads(entries: Iterable[int]) -> Iterator[int]:
+        """Every head of the functions at `entries`, in all their chunks: their instructions, and the data inside them."""
+        for entry in entries:
             for start, end in idautils.Chunks(entry):
                 yield from idautils.Heads(start, end)
+
+    @staticmethod
+    @functools.cache  # one IDA has one database open
+    def _constants_of(entry: int) -> frozenset[int]:
+        """
+        Every integer the function at `entry` uses, as wide as it uses it: its instructions'
+        immediate operands (IDA joins aarch64's MOVZ/MOVK and ARM's MOVW/MOVT into one MOV),
+        and the words they load from a literal pool inside code.
+        """
+        constants = set()
+        instruction = ida_ua.insn_t()
+        for head in IDAFunction._iter_function_heads([entry]):
+            if not ida_bytes.is_code(ida_bytes.get_flags(head)) or ida_ua.decode_insn(instruction, head) <= 0:
+                continue
+            for operand in itertools.takewhile(lambda operand: operand.type != ida_ua.o_void, instruction.ops):
+                if operand.type == ida_ua.o_imm:
+                    constants.add(operand.value & (1 << 8 * ida_ua.get_dtype_size(operand.dtype)) - 1)
+            for pool in idautils.DataRefsFrom(head):
+                size = ida_bytes.get_item_size(pool)
+                if Region.of(pool) is Region.OWN_CODE and ida_bytes.is_data(ida_bytes.get_flags(pool)) and size in (4, 8):
+                    constants.add(ida_bytes.get_qword(pool) if size == 8 else ida_bytes.get_dword(pool))
+        return frozenset(constants)
+
+    @staticmethod
+    def _reached(start: Iterable[int], step: Callable[[set[int]], Iterable[int]], max_depth: int | None) -> set[int]:
+        """The functions `step` leads to from those at `start` (it calls, or is called by), in up to `max_depth` steps (None: any number)."""
+        reached, frontier = set(), set(start)
+        for _ in range(max_depth) if max_depth is not None else itertools.count():
+            frontier = set(step(frontier)) - reached
+            if not frontier:
+                break
+            reached |= frontier
+        return reached
 
     @staticmethod
     def function_of(address: int) -> int | None:

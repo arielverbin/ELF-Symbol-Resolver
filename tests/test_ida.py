@@ -10,7 +10,7 @@ lambdas, templates, and objects initialized at startup or on first use.
 """
 import pytest
 from elfresolver.exceptions import AmbiguousSymbolError, SymbolNotFoundError
-from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, VTable
 from real_ida import EXECUTABLES, REAL_IDA, Program, limitation, module_fixture
 
 pytestmark = REAL_IDA
@@ -322,7 +322,8 @@ def test_a_class_is_found_by_its_typeinfo_name(server):
 
 @pytest.mark.xfail(reason=(
     "IDA types a stripped binary's typeinfo and vtables one pointer to an item: the global holding the "
-    "name's pointer is a slot inside the typeinfo, which nothing refers to (the vtable refers to its start)"
+    "name's pointer is a slot inside the typeinfo, which nothing refers to (the vtable refers to its start). "
+    "A VTable is the whole table: see test_every_vtable_is_found_through_its_class_rtti"
 ))
 def test_a_vtable_is_found_through_its_typeinfo(server):
     symbol = GlobalVar().references(GlobalVar().references(String("N3net11CountHandlerE")))
@@ -421,3 +422,37 @@ def test_the_constructor_is_called_at_startup_and_on_first_use(server):
     names = [server.symbols.at(match.address) for match in callers]
     assert len(callers) == 2, names
     assert any(any("lazy_registry" in name for name in at) for at in names), names
+
+
+# VTables: found through their classes' RTTI, each a whole table.
+
+def test_every_vtable_is_found_through_its_class_rtti(server):
+    """At -O0, GCC emits the abstract bases' tables too, with a 0 for each destructor."""
+    found = {name for match in server.resolve_all(VTable()) for name in server.symbols.at(match.address)}
+    assert found == set(server.symbols.names("vtable for "))
+
+
+def test_a_vtable_is_found_by_its_class_name(server):
+    server.resolves(VTable("net::EchoHandler"), to="vtable for net::EchoHandler")
+    server.resolves(VTable("vtable for net::CountHandler"), to="vtable for net::CountHandler")
+
+
+def test_a_vtable_kind_is_found_by_a_virtual_function_in_it(server):
+    server.resolves(VTable().references(Function().references(String("echo handler"))), to="vtable for net::EchoHandler")
+
+
+def test_a_vtable_spans_its_secondary_tables(server):
+    """Inventory's has a second table, for its second base, Counted: its size is the symbol table's."""
+    found = server.resolves(VTable("net::Inventory"), to="vtable for net::Inventory")
+    assert found.size == len(server.symbols.range_of("vtable for net::Inventory"))
+
+
+def test_every_virtual_function_is_found_through_its_vtable(server):
+    found = {name for match in server.resolve_all(Function().referenced_by(VTable("net::Inventory"))) for name in server.symbols.at(match.address)}
+    assert {"net::Inventory::label() const", "net::Inventory::count() const", "non-virtual thunk to net::Inventory::count() const"} <= found, found
+
+
+def test_the_code_referring_to_a_vtable_makes_or_unmakes_its_objects(server):
+    """At -O2, make_handler constructs EchoHandler in place; at -O0, EchoHandler's constructor and destructor do."""
+    found = {name for match in server.resolve_all(Function().references(VTable("net::EchoHandler"))) for name in server.symbols.at(match.address)}
+    assert found and all("EchoHandler" in name or "make_handler" in name for name in found), found

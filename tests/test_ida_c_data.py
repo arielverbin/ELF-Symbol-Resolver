@@ -8,8 +8,11 @@ A GlobalVar is a data item as IDA typed it. In a stripped binary, that is often
 a part of a C object: one of an array's pointers, one of a struct's fields. So
 these tests check that a match lies inside the object the symbol table names.
 """
-from elfresolver.symbols import Function, GlobalVar, String
-from real_ida import EXECUTABLES, REAL_IDA, Program, limitation, module_fixture
+import pytest
+from elfresolver import ResolvedSymbol
+from elfresolver.exceptions import IDAError
+from elfresolver.symbols import Function, GlobalVar, String, Symbol
+from real_ida import EXECUTABLES, REAL_IDA, Build, Program, limitation, module_fixture
 
 pytestmark = REAL_IDA
 
@@ -243,3 +246,33 @@ def test_a_jump_table_is_no_global(data):
     data.resolves(classify, to="classify")
     globals_used = data.resolve_all(GlobalVar().referenced_by(classify))
     assert globals_used == [], [data._described(match.address) for match in globals_used]
+
+
+# Decompiled structure: Hex-Rays' (a test skips where IDA has no decompiler for the processor).
+
+def decompiled(data: Build, symbol: Symbol) -> list[ResolvedSymbol]:
+    try:
+        return data.resolve_all(symbol)
+    except IDAError as error:
+        if "needs the Hex-Rays decompiler" in str(error):
+            pytest.skip(str(error))
+        raise
+
+
+def test_a_function_is_found_by_its_loop(data):
+    found = decompiled(data, Function().references(String("list sum %d\n")).structured_with(loops=1))
+    assert [match.address for match in found] == [data.symbols.address("sum_list")]
+
+
+def test_the_functions_with_loops_are_those_the_source_has_loops_in(data):
+    """At -O3, GCC unrolls sum_primes's loop into a switch on the count: then sum_list's is the only one left."""
+    found = {name for match in decompiled(data, Function().structured_with(loops=(1, None))) for name in data.symbols.at(match.address)}
+    assert "sum_list" in found and found <= {"sum_list", "sum_primes"}, found
+
+
+def test_a_switch_is_found_by_its_cases(data, request):
+    limitation(request, when=data.target.name == "aarch64-O2", reason=(
+        "aarch64's GCC compiles a switch of 7 cases to a chain of compares at -O2: Hex-Rays shows 8 ifs"
+    ))
+    found = {name for match in decompiled(data, Function().structured_with(switch_cases=(6, None))) for name in data.symbols.at(match.address)}
+    assert {"color_name", "classify"} <= found, found

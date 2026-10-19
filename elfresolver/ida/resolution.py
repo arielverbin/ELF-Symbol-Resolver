@@ -1,15 +1,9 @@
 from __future__ import annotations
 import logging
-from typing import Callable, Mapping
-from elfresolver.ida.symbols import IDAFunction, IDAGlobalVar, IDAPLTEntry, IDAString, IDASymbol
-from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, Symbol
-
-_KINDS: Mapping[type[Symbol], type[IDASymbol]] = {
-    Function: IDAFunction,
-    PLTEntry: IDAPLTEntry,
-    GlobalVar: IDAGlobalVar,
-    String: IDAString,
-}
+from typing import Callable
+from elfresolver.exceptions import ResolveInterrupted
+from elfresolver.ida.symbols import IDASymbol  # with every kind it registers (see IDASymbol.kinds)
+from elfresolver.symbols import Symbol
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +30,13 @@ class SymbolResolution:
     def as_resolvable(self, symbol: Symbol) -> IDASymbol:
         """The IDASymbol of `symbol`: the same one for every symbol equal to it."""
         if symbol not in self._symbols:
-            self._symbols[symbol] = _KINDS[type(symbol)](symbol, self)
+            self._symbols[symbol] = IDASymbol.kinds[type(symbol)](symbol, self)
         else:
             logger.debug(f"symbol {symbol!r} already constructed")
 
         return self._symbols[symbol]
+
+    def stop_if_cancelled(self) -> None:
+        """Raise ResolveInterrupted if the resolver has cancelled the resolve under way (see `interrupted`)."""
+        if self.interrupted():
+            raise ResolveInterrupted("The resolver cancelled the resolve")

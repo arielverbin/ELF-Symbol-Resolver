@@ -7,15 +7,18 @@ the stand-ins for IDA's modules (see fakes.example_binary and fake_ida_modules.p
   * A symbol met again, alone or nested in another, is answered from memory.
   * An interrupted resolve raises ResolveInterrupted, and isn't remembered.
   * A variable holding a function's pointer is found by it, and finds it.
+  * Heavy constraints check only the candidates the light ones left; once none are, the rest are skipped.
+  * Calls are followed as deep as asked; constants are found as wide as they are used.
 """
 import logging
 import pytest
 import fake_ida_modules
-from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, VTable
 from elfresolver import ResolvedSymbol
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.resolution import SymbolResolution
-from fakes import FakeBinary
+from elfresolver.ida.symbols import IDASymbol
+from fakes import FakeBinary, example_binary
 
 RECVFROM, PUTS, PROMPT, SERVED = 0x401030, 0x401040, 0x402004, 0x404010
 PARSE, READ, OTHER_PROMPTER, MAIN = 0x401200, 0x401300, 0x401400, 0x401500
@@ -135,3 +138,69 @@ def test_a_variable_holding_a_functions_pointer_is_found_by_it_and_finds_it(entr
     resolution = SymbolResolution()
     assert resolution.as_resolvable(GlobalVar().references(Function())).resolve() == {pointer}
     assert resolution.as_resolvable(Function().referenced_by(GlobalVar("exit_hook"))).resolve() == {hook}
+
+
+FUNCTIONS = {PARSE, READ, OTHER_PROMPTER, MAIN}
+
+
+def test_every_kind_of_symbol_resolves_as_its_ida_kind():
+    assert set(IDASymbol.kinds) == {Function, PLTEntry, GlobalVar, String, VTable}
+
+
+def test_a_heavy_constraint_checks_only_the_candidates_left():
+    """The name of only recvfrom's caller is looked at, not of every function: matching runs last."""
+    ida = fake_ida_modules.open(example_binary())
+    assert SymbolResolution().as_resolvable(Function().matching("^sub_").calls(PLTEntry("recvfrom"))).resolve() == {READ}
+    assert set(ida.names_asked) & FUNCTIONS == {READ}
+
+
+def test_heavy_constraints_alone_check_every_symbol_of_the_kind():
+    ida = fake_ida_modules.open(example_binary())
+    assert SymbolResolution().as_resolvable(Function().matching("^sub_")).resolve() == FUNCTIONS
+    assert set(ida.names_asked) & FUNCTIONS == FUNCTIONS
+
+
+def test_once_nothing_is_left_the_rest_is_skipped(resolution, caplog):
+    caplog.set_level(logging.INFO, logger="elfresolver.ida.resolution")
+    prompt = String("enter input")
+    assert resolution.resolve(Function().calls(PLTEntry("sendto")).references(prompt)).resolve() == frozenset()
+    assert not any(message.startswith(f"Resolving {prompt!r}") for message in caplog.messages)
+
+
+def test_a_heavy_constraint_is_cancelled_between_its_candidates(ida):
+    """The first check comes before matching starts; the second, before its first candidate."""
+    answers = iter([False, True])
+    with pytest.raises(ResolveInterrupted):
+        SymbolResolution(interrupted=lambda: next(answers)).as_resolvable(Function().matching("^sub_")).resolve()
+
+
+@pytest.mark.parametrize(("symbol", "matches"), [
+    (Function().called_by(Function("sub_401500")), {READ}),
+    (Function().called_by(Function("sub_401500"), max_depth=2), {READ, PARSE}),
+    (PLTEntry().called_by(Function("sub_401500"), max_depth=2), {RECVFROM, PUTS}),
+    (Function().calls(PLTEntry("recvfrom"), max_depth=2), {READ, MAIN}),
+    (Function().calls(PLTEntry("puts"), max_depth=None), {READ, OTHER_PROMPTER, MAIN}),
+    (Function().calls(Function("sub_401200"), max_depth=5), {READ, MAIN}),
+], ids=repr)
+def test_calls_are_followed_as_deep_as_asked(resolution, symbol, matches):
+    assert resolution.as_resolvable(symbol).resolve() == matches
+
+
+def test_a_constant_is_found_as_wide_as_it_is_used():
+    binary = FakeBinary(image_base=0x400000)
+    lcg = binary.function(0x401100, constants=[0x5DEECE66D, 0xB])
+    masked = binary.function(0x401200, constants=[0xFFFFFFFF])
+    fake_ida_modules.open(binary)
+    resolution = SymbolResolution()
+    assert resolution.as_resolvable(Function().uses_const(0x5DEECE66D)).resolve() == {lcg}
+    assert resolution.as_resolvable(Function().uses_const(-1)).resolve() == {masked}   # -1 in a dword
+    assert resolution.as_resolvable(Function().uses_const(0x5)).resolve() == frozenset()   # 0x5DEECE66D's top isn't a constant
+
+
+def test_structure_needs_a_decompiler(resolution):
+    with pytest.raises(RuntimeError, match="needs the Hex-Rays decompiler"):
+        resolution.as_resolvable(Function().structured_with(loops=1)).resolve()
+
+
+def test_a_binary_without_rtti_has_no_vtables(resolution):
+    assert resolution.as_resolvable(VTable()).resolve() == frozenset()

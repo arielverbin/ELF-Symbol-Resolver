@@ -85,3 +85,22 @@ def test_an_argument_of_the_wrong_kind_raises_where_it_is_written(build):
 def test_a_malformed_pattern_raises_where_it_is_written():
     with pytest.raises(re.error):
         String().matching("enter (input")
+
+
+def test_a_default_goes_unsaid_in_a_repr():
+    callee = Function()
+    assert repr(Function().calls(callee)).endswith(f".calls(callee={callee.id})")
+    assert repr(Function().calls(callee, max_depth=2)).endswith(f".calls(callee={callee.id}, max_depth=2)")
+    assert repr(Function().structured_with(loops=(1, None))).endswith(".structured_with(loops=(1, None))")
+
+
+@pytest.mark.parametrize("build", [
+    lambda: Function().calls(Function(), max_depth=0),
+    lambda: Function().called_by(Function(), max_depth=1.5),
+    lambda: Function().structured_with(),
+    lambda: Function().structured_with(loops=-1),
+    lambda: Function().structured_with(ifs=(1, 2, 3)),
+], ids=["no depth", "a fractional depth", "no count", "a negative count", "three bounds"])
+def test_a_malformed_argument_raises_where_it_is_written(build):
+    with pytest.raises(ValueError):
+        build()

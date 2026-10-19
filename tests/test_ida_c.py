@@ -5,7 +5,7 @@ program of the control flow optimizing compilers make of C (tail calls, cold
 paths, inlined helpers, merged strings).
 """
 from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
-from real_ida import EXECUTABLES, REAL_IDA, SHARED_OBJECTS, Program, module_fixture
+from real_ida import EXECUTABLES, REAL_IDA, SHARED_OBJECTS, Program, limitation, module_fixture
 
 pytestmark = REAL_IDA
 
@@ -99,6 +99,17 @@ KEEP void *puts_address(void) { return (void *)&puts; }
 // A tail call into the PLT.
 KEEP void complain(const char *what) { perror(what); }
 
+// Constants: a 64-bit multiplier (several instructions on ARM), and FNV-1a's offset basis and prime.
+KEEP unsigned long long lcg_next(unsigned long long x) { return x * 0x5DEECE66DULL + 0xB; }
+KEEP unsigned fnv1a(const char *text) {
+    unsigned hash = 2166136261u;
+    for (; *text; ++text) {
+        hash ^= (unsigned char)*text;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 // A call to a function that never returns.
 KEEP __attribute__((noreturn)) void die(const char *why) { fprintf(stderr, "dying: %s\n", why); exit(1); }
 KEEP int checked_divide(int a, int b) { if (b == 0) die("division by zero"); return a / b; }
@@ -116,6 +127,7 @@ int main(int argc, char **argv) {
     install_handlers();
     printf("%p\n", puts_address());
     complain("main");
+    printf("%llu %u\n", lcg_next(argc), fnv1a(argv[0]));
     return checked_divide(argc, argc);
 }
 """
@@ -189,3 +201,29 @@ def test_a_call_to_a_function_that_never_returns_is_a_call(flow):
     die = Function().references(String("dying: %s\n"))
     flow.resolves(die, to="die")
     flow.resolves_to_one_of(Function().calls(die), flow.symbols.names("checked_divide"))
+
+
+def test_a_function_is_found_by_its_constants(flow):
+    """aarch64 builds a constant 16 bits at a time (MOVZ, MOVK), ARM 16 (MOVW, MOVT): IDA joins them into one MOV."""
+    flow.resolves(Function().uses_const(2166136261), to="fnv1a")
+    flow.resolves(Function().uses_const(16777619), to="fnv1a")
+
+
+def test_a_64_bit_constant_is_found_on_a_64_bit_target(flow, request):
+    limitation(request, when=flow.target.triplet.startswith(("i686", "arm")), reason=(
+        "A 32-bit target multiplies by a 64-bit constant a half at a time: 0xDEECE66D, and 5"
+    ))
+    flow.resolves(Function().uses_const(0x5DEECE66D), to="lcg_next")
+
+
+def test_a_negative_constant_is_found_as_the_unsigned_one_it_is(flow):
+    """A negative value names the unsigned one of its width: 2166136261 - 2**32 is 0x811C9DC5, in 32 bits."""
+    flow.resolves(Function().uses_const(2166136261 - 2**32), to="fnv1a")
+
+
+def test_calls_are_followed_as_deep_as_asked(flow):
+    stage_one = Function().references(String("stage one %d\n"))
+    flow.resolves_all(Function().called_by(stage_one, max_depth=2), to=["stage_two", "stage_three"])
+    stage_three = Function().references(String("stage three %d\n"))
+    flow.resolves_all(Function().calls(stage_three, max_depth=2), to=["stage_one", "stage_two"])
+    flow.resolves_all(Function().calls(stage_three, max_depth=None), to=["stage_one", "stage_two", "main"])

@@ -5,27 +5,28 @@ import ida_bytes # type: ignore
 from elfresolver.ida.layout import Region
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.protocol.messages import ResolvedSymbol
+from elfresolver.symbols import String
 
 
-class IDAString(IDASymbol):
+class IDAString(IDASymbol, kind=String):
     """A NUL-terminated string literal, named by its text."""
 
     def all(self) -> Iterable[int]:
-        return self._literals().keys()
+        return self.literals().keys()
 
     def owners(self, addresses: Iterable[int]) -> Iterator[int]:
-        return (address for address in addresses if address in self._literals())
+        return (address for address in addresses if address in self.literals())
 
     def names_of(self, address: int) -> tuple[str, ...]:
-        return (self._literals()[address],)
+        return (self.literals()[address],)
 
     def describe(self, address: int) -> ResolvedSymbol:
-        text = self._literals()[address]
+        text = self.literals()[address]
         return self.found(address, text, len(text.encode()) + 1)
 
     @staticmethod
     @functools.cache  # one IDA has one database open
-    def _literals() -> dict[int, str]:
+    def literals() -> dict[int, str]:
         """Every C string literal where variables live, by its address (see c_strings): where it starts, its text."""
         literals = {}
         for segment in Region.VARIABLES.segments():

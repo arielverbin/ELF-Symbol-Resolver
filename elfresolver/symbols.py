@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from typing import Iterable, Mapping, Self
-from elfresolver.constraints import CalledBy, Calls, IDAConstraint, Matching, ReferencedBy, References
+from elfresolver.constraints import CalledBy, Calls, Count, IDAConstraint, Matching, ReferencedBy, References, StructuredWith, UsesConst
 from elfresolver.protocol.serializable import Serializable
 
 
@@ -67,13 +67,28 @@ class Symbol(Serializable):
 class Function(Symbol):
     """A function of the binary's own code (an import's PLT stub is a PLTEntry)."""
 
-    def calls(self, callee: Function) -> Self:
-        """This function, also calling `callee`: directly, by a tail jump, or through a thunk."""
-        return self._with(Calls(_expect_symbol(Function, callee, "calls")))
+    def calls(self, callee: Function, max_depth: int | None = 1) -> Self:
+        """This function, also calling `callee`: directly, by a tail jump, or through a thunk.
+        A `max_depth` above 1 allows calls on the way: 2, a call of a function calling it; None, any number."""
+        return self._with(Calls(_expect_symbol(Function, callee, "calls"), max_depth))
 
-    def called_by(self, caller: Function) -> Self:
-        """This function, also called by `caller`."""
-        return self._with(CalledBy(_expect_symbol(Function, caller, "called_by")))
+    def called_by(self, caller: Function, max_depth: int | None = 1) -> Self:
+        """This function, also called by `caller`; with a `max_depth` above 1 (None: any), by a function it calls, too."""
+        return self._with(CalledBy(_expect_symbol(Function, caller, "called_by"), max_depth))
+
+    def uses_const(self, value: int) -> Self:
+        """This function, also using the integer `value`: as an instruction's operand, or loaded from a literal pool."""
+        return self._with(UsesConst(value))
+
+    def structured_with(self, *, loops: Count | None = None, ifs: Count | None = None, switch_cases: Count | None = None) -> Self:
+        """
+        This function, also with loops, ifs and switch cases in these counts, in its decompiled
+        code (it needs Hex-Rays): exactly n, or (at least, at most), with None for unbounded.
+        Optimization changes them (unrolling, branchless code, switches made tables): bounds last longer.
+
+            Function().structured_with(loops=1, ifs=(2, None))
+        """
+        return self._with(StructuredWith(loops, ifs, switch_cases))
 
 
 class PLTEntry(Function):
@@ -87,6 +102,15 @@ class GlobalVar(Symbol):
 
 class String(Symbol):
     """A NUL-terminated string literal, named by its text."""
+
+
+class VTable(Symbol):
+    """
+    A C++ class's virtual table (Itanium ABI): its offset to top, its typeinfo, then its
+    virtual functions' pointers, and those of its secondary tables (multiple inheritance).
+    Found through the class's RTTI, and named by the class's demangled name:
+    `VTable("net::EchoHandler")`, or `vtable for net::EchoHandler`.
+    """
 
 
 def _expect_symbol(kind: type[Symbol], argument: object, method: str) -> Symbol:

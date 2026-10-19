@@ -7,9 +7,10 @@ from elfresolver.ida.layout import Region
 from elfresolver.ida.symbols.function import IDAFunction
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.protocol.messages import ResolvedSymbol
+from elfresolver.symbols import GlobalVar
 
 
-class IDAGlobalVar(IDASymbol):
+class IDAGlobalVar(IDASymbol, kind=GlobalVar):
     """A global variable: a data item where variables live, other than a string literal."""
 
     def references_to(self) -> Iterator[int]:

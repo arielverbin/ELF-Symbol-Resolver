@@ -125,7 +125,7 @@ uses it: a struct whose fields are read may be one item per field, and an array 
 the slot holding the handler's pointer, inside the table; `resolve_all()` gets every item a
 function reads.
 
-A `VTable` is a whole vtable group, as `nm -S` sizes it: its primary table (vcall and vbase
+A `VTable` is a class's whole vtable, as `nm -S` sizes it: its primary table (vcall and vbase
 offsets, offset to top, typeinfo, then the virtual functions' pointers), and a secondary table
 for each base past the first. It is found through the class's RTTI (a typeinfo name, pointed at
 by a typeinfo, pointed at by the table), or by a `_ZTV` symbol (as a shared object exports, and
@@ -135,8 +135,8 @@ its virtual functions, `VTable().references(method)` the tables holding `method`
 `Function().references(VTable("net::EchoHandler"))` the code making or unmaking its objects.
 
 Constraints that check candidates one by one (`.matching()`, `.uses_const()`,
-`.structured_with()`) run after the others, on what those left: write the cheap anchors (an
-import, a string, a call), and decompiling is only for the few functions they leave.
+`.structured_with()`) run after the others, cheapest first, on what those left: write the cheap
+anchors (an import, a string, a call), and decompiling is only for the few functions they leave.
 `.structured_with()` counts change with optimization (loops unrolled, switches turned into
 tables or chains of compares, ifs made branchless): bounds outlast exact counts.
 
@@ -190,16 +190,19 @@ tables or chains of compares, ifs made branchless): bounds outlast exact counts.
 
 Inside IDA, each constraint allows a set of addresses, and a symbol's matches are the
 addresses all of them allow. A constraint relating to another symbol is followed back from that
-symbol's matches (usually one import or one string), so nothing is scanned for nothing. The
-light constraints are met first, in the order written, then the heavy ones, which check
-candidates one by one: each is handed what the constraints before it left (every symbol of the
-kind, if all are heavy), and once nothing is left, the rest are skipped. Every symbol is
-resolved once per session: met again, alone or nested, it is answered from memory.
+symbol's matches (usually one import or one string), so nothing is scanned for nothing.
+`SymbolResolution` meets the constraints that find their matches at once first, in the order
+written, then those checking candidates one by one, lowest cost first: each is handed what the
+constraints before it left (every symbol of the kind, if none came before), and once nothing is
+left, the rest are skipped. Every symbol is resolved once per session: met again, alone or
+nested, it is answered from memory.
 
 A new constraint is three pieces: a dataclass in `elfresolver/constraints.py`, the `Symbol`
-method adding it, and a method of the same name on its kind inside IDA (`IDASymbol.heavy`
-marks one that checks candidates). A new kind is a `Symbol` class, and an `IDASymbol` class
-registering itself for it (`class IDAVTable(IDASymbol, kind=VTable)`) in `elfresolver/ida/symbols/`.
+method adding it, and a class method on its kind inside IDA, marked with the constraint it
+meets: `@SymbolResolution.constraint("calls")` for one returning every match at once, or
+`@SymbolResolution.constraint("uses_const", cost=2)` for one checking a single candidate. A new
+kind is a `Symbol` class, and an `IDASymbol` class registering itself for it
+(`class IDAVTable(IDASymbol, kind=VTable)`) in `elfresolver/ida/symbols/`.
 
 Everything IDA's side logs is logged again on your side, under the same logger names. An
 exception inside IDA is raised as an `IDAError`, with IDA's traceback attached as a note.
@@ -231,7 +234,7 @@ Measured with IDA 9.2 on Ubuntu's aarch64 builds of each binary:
 | Decompiling a function (`.structured_with()`) |               |                    | 0.5s each   |
 
 A constraint relating to an anchor (an import, a string) takes milliseconds, whatever the
-binary's size. A heavy one costs per candidate, so give it anchors: `.structured_with()` on
+binary's size. One checking candidates costs per candidate, so give it anchors: `.structured_with()` on
 the 360 functions calling `malloc` in gdb takes 3 minutes, on a handful a few seconds.
 
 ---

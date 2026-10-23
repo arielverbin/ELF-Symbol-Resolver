@@ -8,7 +8,7 @@ from typing import Callable
 import ida_name # type: ignore
 
 _ABI_TAG = re.compile(r"\[abi:[^\]]*\]")
-_CLOSURE = re.compile(r"'(lambda|unnamed)(\d*)'")       # LLVM's names of a lambda's, and an unnamed type's
+_CLOSURE = re.compile(r"'(lambda|unnamed)(\d*)'")        # LLVM's names of a lambda's, and an unnamed type's
 _CLONE = re.compile(r" \((\.[\w.]+)\)")                  # LLVM's ' (.cold)'
 _ADJACENT_CLOSES = re.compile(r"(?<!operator)>(?=>)")    # LLVM's '>>', in a template argument list
 

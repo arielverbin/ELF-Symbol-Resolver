@@ -10,9 +10,9 @@ import ida_xref # type: ignore
 import idautils # type: ignore
 from elfresolver.constraints import Count
 from elfresolver.ida.layout import Region
+from elfresolver.ida.resolution import SymbolResolution
 from elfresolver.ida.structure import Structure
 from elfresolver.ida.symbols.symbol import IDASymbol
-from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import Function
 
 _CALLS = (ida_xref.fl_CN, ida_xref.fl_CF)
@@ -26,48 +26,54 @@ class IDAFunction(IDASymbol, kind=Function):
 
     # The constraints only a function carries.
 
-    def calls(self, callee: IDAFunction, max_depth: int | None = 1) -> Iterable[int]:
+    @classmethod
+    @SymbolResolution.constraint("calls")
+    def calls(cls, callee: IDAFunction, max_depth: int | None) -> Iterable[int]:
         """The functions calling `callee` (see calls_to), or calling one that does, `max_depth` deep."""
-        return self.owners(self._reached(callee.resolve(), callee.calls_to, max_depth))
+        return cls.filter_from(cls._reached(callee.matches, callee.calls_to, max_depth))
 
-    def called_by(self, caller: IDAFunction, max_depth: int | None = 1) -> Iterable[int]:
+    @classmethod
+    @SymbolResolution.constraint("called_by")
+    def called_by(cls, caller: IDAFunction, max_depth: int | None) -> Iterable[int]:
         """The functions `caller` calls (see calls_from), or that those call, `max_depth` deep."""
-        return self.owners(self._reached(caller.resolve(), caller.calls_from, max_depth))
+        return cls.filter_from(cls._reached(caller.matches, caller.calls_from, max_depth))
 
-    @IDASymbol.heavy
-    def uses_const(self, value: int, *, candidates: frozenset[int]) -> Iterator[int]:
-        """The candidates using `value` (see _constants_of), as wide as any operand it fits: -1 is 0xFF in a byte, 0xFFFFFFFF in a dword."""
+    @classmethod
+    @SymbolResolution.constraint("uses_const", cost=2)
+    def uses_const(cls, entry: int, value: int) -> bool:
+        """True if the function at `entry` uses `value` (see _constants_of), as wide as any operand it fits: -1 is 0xFF in a byte, 0xFFFFFFFF in a dword."""
         forms = {value & (1 << 8 * width) - 1 for width in (1, 2, 4, 8) if -(1 << 8 * width - 1) <= value < 1 << 8 * width}
-        return (entry for entry in self._each(candidates) if forms & self._constants_of(entry))
+        return not forms.isdisjoint(cls._constants_of(entry))
 
-    @IDASymbol.heavy
-    def structured_with(self, loops: Count | None, ifs: Count | None, switch_cases: Count | None, *, candidates: frozenset[int]) -> Iterator[int]:
-        """The candidates whose decompiled code has loops, ifs and switch cases in these counts (see Structure)."""
-        return (
-            entry for entry in self._each(candidates)
-            if (structure := Structure.of(entry)) is not None and structure.has(loops, ifs, switch_cases)
-        )
+    @classmethod
+    @SymbolResolution.constraint("structured_with", cost=3)
+    def structured_with(cls, entry: int, loops: Count | None, ifs: Count | None, switch_cases: Count | None) -> bool:
+        """True if the function at `entry` decompiles to loops, ifs and switch cases in these counts (see Structure)."""
+        structure = Structure.of(entry)
+        return structure is not None and structure.has(loops, ifs, switch_cases)
 
     # What calls functions, and what they call and refer to: from any of their instructions.
 
-    def calls_to(self, entries: Iterable[int]) -> Iterator[int]:
+    @classmethod
+    def calls_to(cls, entries: Iterable[int]) -> Iterator[int]:
         """Every function calling one of those at `entries`: directly, by a tail jump, or through a thunk on the way (see _thunk_at)."""
         callees = list(entries)
         while callees:
             for xref in idautils.XrefsTo(callees.pop()):
-                if self._is_call(xref) and (caller := self.function_of(xref.frm)) is not None:
+                if cls._is_call(xref) and (caller := cls.function_of(xref.frm)) is not None:
                     yield caller
-                    if (thunk := self._thunk_at(xref.frm)) is not None:
+                    if (thunk := cls._thunk_at(xref.frm)) is not None:
                         callees.append(thunk)  # what calls the thunk calls the callee too
 
-    def calls_from(self, entries: Iterable[int]) -> Iterator[int]:
+    @classmethod
+    def calls_from(cls, entries: Iterable[int]) -> Iterator[int]:
         """Every function those at `entries` call or tail-jump to, past the thunks on the way (see _thunk_at)."""
-        for xref in (xref for head in self._iter_function_heads(entries) for xref in idautils.XrefsFrom(head)):
-            if not self._is_call(xref):
+        for xref in (xref for head in cls._iter_function_heads(entries) for xref in idautils.XrefsFrom(head)):
+            if not cls._is_call(xref):
                 continue
             callee = xref.to
             for _ in range(_LONGEST_THUNK_CHAIN):
-                if self._thunk_at(callee) != callee:
+                if cls._thunk_at(callee) != callee:
                     break
                 target, _ = ida_funcs.calc_thunk_func_target(ida_funcs.get_func(callee))
                 if target == ida_idaapi.BADADDR:
@@ -77,25 +83,32 @@ class IDAFunction(IDASymbol, kind=Function):
 
     def references_to(self) -> Iterator[int]:
         """Every address referring to one of the matches: to its entry, or one past it (a Thumb function's pointer has its low bit set)."""
-        entries = (address for entry in self.resolve() for address in dict.fromkeys([entry, entry | 1]))
+        entries = (address for entry in self.matches for address in dict.fromkeys([entry, entry | 1]))
         return self._data_refs(idautils.DataRefsTo, entries)
 
     def references_from(self) -> Iterator[int]:
         """Every address the matches refer to, from any of their instructions (or the data inside them: an ARM literal pool)."""
-        return self._data_refs(idautils.DataRefsFrom, self._iter_function_heads(self.resolve()))
+        return self._data_refs(idautils.DataRefsFrom, self._iter_function_heads(self.matches))
 
     # What this kind of symbol is.
 
-    def all(self) -> Iterable[int]:
+    @classmethod
+    def all(cls) -> Iterable[int]:
         return (entry for entry in idautils.Functions() if Region.of(entry) is Region.OWN_CODE)
 
-    def owners(self, addresses: Iterable[int]) -> Iterator[int]:
+    @classmethod
+    def filter_from(cls, addresses: Iterable[int]) -> Iterator[int]:
         for address in addresses:
-            if (entry := self.function_of(address)) is not None and Region.of(entry) is Region.OWN_CODE:
+            if (entry := cls.function_of(address)) is not None and Region.of(entry) is Region.OWN_CODE:
                 yield entry
 
-    def describe(self, entry: int, /) -> ResolvedSymbol:
-        return self.found(entry, ida_funcs.get_func_name(entry), ida_funcs.calc_func_size(ida_funcs.get_func(entry)))
+    @classmethod
+    def display_name(cls, entry: int, /) -> str | None:
+        return ida_funcs.get_func_name(entry)
+
+    @classmethod
+    def size_of(cls, entry: int, /) -> int:
+        return ida_funcs.calc_func_size(ida_funcs.get_func(entry))
 
     # Reading functions.
 

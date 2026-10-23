@@ -12,7 +12,6 @@ from elfresolver.ida.names import SymName
 from elfresolver.ida.symbols.function import IDAFunction
 from elfresolver.ida.symbols.string import IDAString
 from elfresolver.ida.symbols.symbol import IDASymbol
-from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import VTable
 
 _CLASS_TYPE = re.compile(r"[0-9NSZ]")  # how a class's mangled type starts: its name's length, or N (nested), S (std::), Z (local)
@@ -20,121 +19,136 @@ _MOST_OFFSETS = 8                      # vcall and vbase offsets before a table'
 
 
 @dataclass(frozen=True)
-class _Group:
-    """A vtable group, as found: where it ends, and its name ('_ZTV' and its class's mangled type)."""
-    end: int
-    name: SymName
+class _VTable:
+    """A class's vtable, parsed: its primary table, then a secondary table for each base past the first."""
+    start: int                       # its first word: the primary table's vcall and vbase offsets, or its offset to top
+    end: int                         # past its last table's last slot
+    name: SymName                    # '_ZTV' and its class's mangled type
+    typeinfo: int                    # 0 without RTTI
+    address_points: tuple[int, ...]  # where objects point: into the primary table, then into each secondary table
+
+    @property
+    def size(self) -> int:
+        return self.end - self.start
 
 
 class IDAVTable(IDASymbol, kind=VTable):
     """
-    A C++ class's vtable group (Itanium ABI): a primary table, then a secondary one for
-    each base past the first (multiple inheritance). Each table is
+    A C++ class's vtable (Itanium ABI): a primary table, then a secondary table for each
+    base past the first (multiple inheritance). Each table is
 
         [vcall and vbase offsets] [offset to top] [typeinfo] [slot] [slot] ...
-                                                             ^ where objects point
+        ^ for virtual inheritances                           ^ where objects point
 
     The primary's offset to top is 0, a secondary's below 0. A slot holds a virtual
     function's pointer, or 0 for an abstract class's destructor. The typeinfo's second
-    word points at the class's mangled name ("N3net7HandlerE").
+    word points at the class's mangled name (i.e. "N3net7HandlerE").
     """
 
     def references_to(self) -> Iterator[int]:
         """Every address referring to one of the matches: to any of its words (a constructor, to where objects point)."""
         members = (
-            address for start in self.resolve() for address in range(start, self._groups()[start].end)
+            address for start in self.matches for address in range(start, self._vtables()[start].end)
             if ida_bytes.has_xref(ida_bytes.get_flags(address))
         )
         return self._data_refs(idautils.DataRefsTo, members)
 
     def references_from(self) -> Iterator[int]:
         """Every address the matches point at: their virtual functions, and their typeinfo."""
-        words = (word for start in self.resolve() for word in idautils.Heads(start, self._groups()[start].end))
+        words = (word for start in self.matches for word in idautils.Heads(start, self._vtables()[start].end))
         return self._data_refs(idautils.DataRefsFrom, words)
 
-    def all(self) -> Iterable[int]:
-        return self._groups().keys()
+    @classmethod
+    def all(cls) -> Iterable[int]:
+        return cls._vtables().keys()
 
-    def owners(self, addresses: Iterable[int]) -> Iterator[int]:
-        starts = list(self._groups())
+    @classmethod
+    def filter_from(cls, addresses: Iterable[int]) -> Iterator[int]:
+        starts = list(cls._vtables())
         for address in addresses:
             index = bisect.bisect_right(starts, address) - 1
-            if index >= 0 and address < self._groups()[starts[index]].end:
+            if index >= 0 and address < cls._vtables()[starts[index]].end:
                 yield starts[index]
 
-    def names_of(self, start: int, /) -> tuple[str, ...]:
+    @classmethod
+    def names_of(cls, start: int, /) -> tuple[str, ...]:
         """The forms of its name (mangled, and 'vtable for net::Handler'), and its class's: 'net::Handler'."""
-        name = self._groups()[start].name
+        name = cls._vtables()[start].name
         return (*name.forms, name.demangled.removeprefix("vtable for ")) if name.demangled else name.forms
 
-    def describe(self, start: int, /) -> ResolvedSymbol:
-        group = self._groups()[start]
-        return self.found(start, group.name.demangled or group.name.linked, group.end - start)
+    @classmethod
+    def display_name(cls, start: int, /) -> str | None:
+        name = cls._vtables()[start].name
+        return name.demangled or name.linked
+
+    @classmethod
+    def size_of(cls, start: int, /) -> int:
+        return cls._vtables()[start].size
 
     @staticmethod
     @functools.cache  # one IDA has one database open
-    def _groups() -> dict[int, _Group]:
-        """Every vtable group, by its start, in address order (see _VTableParser)."""
-        return _VTableParser().groups()
+    def _vtables() -> dict[int, _VTable]:
+        """Every vtable, by its start, in address order (see _VTableParser)."""
+        return _VTableParser().parse_all()
 
 
 @dataclass(frozen=True)
-class _Header:
+class _VTableHeader:
     """
-    The start of a vtable group: where it starts, where objects point (past the primary
-    table's offset to top and typeinfo), its typeinfo (0 without RTTI), and its name
-    ('_ZTV' and its class's mangled type, or the symbol's at its start).
+    Where a vtable starts, before its end is known: its first word, where objects point
+    into its primary table (past its offset to top and typeinfo), its typeinfo (0 without
+    RTTI), and its name ('_ZTV' and its class's mangled type, or the symbol's at its start).
     """
     start: int
     address_point: int
     typeinfo: int
-    name: str
+    name: SymName
 
 
 class _VTableParser:
-    """Reads the vtable groups (see IDAVTable) out of the database IDA has open, a pointer-sized word at a time."""
+    """
+    Reads the vtables (see IDAVTable) out of the database IDA has open, a pointer-sized
+    word at a time: first where each starts (see _headers), then how far each goes (see _parse).
+    """
 
     def __init__(self) -> None:
         self.word = 8 if ida_ida.inf_is_64bit() else 4
 
-    def groups(self) -> dict[int, _Group]:
-        """Every vtable group with a slot (see _headers), by its start, in address order: each up to the next one's start at most."""
+    def parse_all(self) -> dict[int, _VTable]:
+        """Every vtable with a slot, by its start, in address order: each parsed up to the next one's start at most."""
         headers = sorted(self._headers(), key=lambda header: header.start)
         bounds = [*(header.start for header in headers[1:]), None]
-        groups = {}
-        for header, bound in zip(headers, bounds):
-            end = self._end_of(header, bound)
-            if end > header.address_point:
-                groups[header.start] = _Group(end, SymName(header.name))
-        return groups
+        vtables = (self._parse(header, bound) for header, bound in zip(headers, bounds))
+        return {vtable.start: vtable for vtable in vtables if vtable is not None}
 
-    def _headers(self) -> Iterable[_Header]:
+    def _headers(self) -> Iterable[_VTableHeader]:
         """
-        Every vtable group's header: each primary table RTTI leads to (see _rtti_headers);
-        moved back, and renamed, where a symbol starts the group past vcall and vbase
-        offsets (a shared object exports '_ZTV...' and '_ZTC...' ones, and IDA names those
-        whose RTTI it parsed); and one for each symbol starting a table without RTTI.
+        Every vtable's header: each primary table RTTI leads to (see _rtti_headers); moved
+        back, and renamed, where a symbol starts the vtable past vcall and vbase offsets (a
+        shared object exports '_ZTV...' and '_ZTC...' ones, and IDA names those whose RTTI
+        it parsed); and one for each symbol starting a table without RTTI.
         """
         headers = self._rtti_headers()
-        for address, name in idautils.Names():
-            if not name.startswith(("_ZTV", "_ZTC")) or Region.of(address) is not Region.VARIABLES:
+        for address, linked in idautils.Names():
+            if not linked.startswith(("_ZTV", "_ZTC")) or Region.of(address) is not Region.VARIABLES:
                 continue
+            name = SymName(linked)
             top = self._offset_to_top_after(address, headers)
             if top is None:
-                headers[address] = _Header(address, address + 2 * self.word, self._read(address + self.word), name)
+                headers[address] = _VTableHeader(address, address + 2 * self.word, self._read(address + self.word), name)
             elif address <= headers[top].start:
-                demangles = SymName(name).demangled is not None  # unlike the 'name_0' IDA gives a name already taken
+                demangles = name.demangled is not None  # unlike the 'name_0' IDA gives a name already taken
                 headers[top] = replace(headers[top], start=address, name=name if demangles else headers[top].name)
         return headers.values()
 
-    def _rtti_headers(self) -> dict[int, _Header]:
+    def _rtti_headers(self) -> dict[int, _VTableHeader]:
         """Every primary table pointing at a typeinfo (see _typeinfos), by its offset to top: a 0 pointing at nothing."""
         headers = {}
         for typeinfo, mangled in self._typeinfos().items():
             for slot in idautils.DataRefsTo(typeinfo):
                 top = slot - self.word
                 if Region.of(slot) is Region.VARIABLES and self._read(top) == 0 and not self._points(top):
-                    headers[top] = _Header(top, slot + self.word, typeinfo, f"_ZTV{mangled}")
+                    headers[top] = _VTableHeader(top, slot + self.word, typeinfo, SymName(f"_ZTV{mangled}"))
         return headers
 
     def _typeinfos(self) -> dict[int, str]:
@@ -152,7 +166,7 @@ class _VTableParser:
                 typeinfos.update((source - self.word, mangled) for source in sources)
         return typeinfos
 
-    def _offset_to_top_after(self, address: int, headers: dict[int, _Header]) -> int | None:
+    def _offset_to_top_after(self, address: int, headers: dict[int, _VTableHeader]) -> int | None:
         """The offset to top of the table in `headers` starting at `address`, past its vcall and vbase offsets (words pointing at nothing)."""
         for word in range(address, address + _MOST_OFFSETS * self.word, self.word):
             if word in headers:
@@ -161,21 +175,27 @@ class _VTableParser:
                 return None
         return None
 
-    def _end_of(self, header: _Header, bound: int | None) -> int:
-        """Where the group of `header` ends: past its primary table's slots, and each secondary table's after them; at `bound` at most."""
+    def _parse(self, header: _VTableHeader, bound: int | None) -> _VTable | None:
+        """
+        The vtable `header` starts: its primary table's slots, then each secondary table's
+        after them, up to `bound` at most. None if it has no slot. Its primary table alone
+        may have none: a construction vtable holds 0s for the destructors it never calls.
+        """
         end = self._slots_end(header.address_point, bound)
+        address_points = [header.address_point]
         while (address_point := self._secondary_at(end, header.typeinfo, bound)) is not None:
             slots_end = self._slots_end(address_point, bound)
             if slots_end == address_point:
                 break
+            address_points.append(address_point)
             end = slots_end
-        return end
+        return _VTable(header.start, end, header.name, header.typeinfo, tuple(address_points)) if end > header.address_point else None
 
     def _secondary_at(self, address: int, typeinfo: int, bound: int | None) -> int | None:
         """
         Where objects point in the secondary table starting at `address`: past its vcall and
         vbase offsets (words pointing at nothing), its offset to top (below 0), and `typeinfo`.
-        None if no secondary table of its group starts there.
+        None if no secondary table of the vtable starts there.
         """
         for top in range(address, address + _MOST_OFFSETS * self.word, self.word):
             if self._past(top + 2 * self.word, bound) or self._points(top):

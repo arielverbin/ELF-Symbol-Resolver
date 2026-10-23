@@ -115,7 +115,7 @@ class String(Symbol):
 
 class VTable(Symbol):
     """
-    A C++ class's vtable group (Itanium ABI): its primary table, and a secondary one for each
+    A C++ class's vtable (Itanium ABI): its primary table, and a secondary one for each
     base past the first, as `nm -S` sizes it. Found through the class's RTTI, or a `_ZTV`
     symbol, and named by the class's demangled name: `VTable("net::EchoHandler")`, or
     `VTable("vtable for net::EchoHandler")`.

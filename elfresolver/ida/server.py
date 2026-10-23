@@ -66,8 +66,7 @@ class Server:
             return CancelResponse(token=self._token)
         except Exception as error:
             return self._failure(error)
-        matches = sorted(resolvable.resolve())  # remembered
-        return ResolveResponse(tuple(resolvable.describe(address) for address in matches), token=self._token)
+        return ResolveResponse(tuple(map(resolvable.parse_from, sorted(resolvable.matches))), token=self._token)
 
     def _cancel_arrived(self) -> bool:
         """True if the resolver has asked to stop the request under way (the only message it sends meanwhile)."""

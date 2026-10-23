@@ -5,13 +5,12 @@ from elfresolver.protocol.serializable import Serializable
 if TYPE_CHECKING:
     from elfresolver.symbols import Function, Symbol
 
-# NOTE: `method` must match a resolving method logic in the corresponding IDASymbol object
 
 @dataclass(frozen=True)
 class IDAConstraint(Serializable):
-    """A constraint a Symbol method adds, shown as that method's call:
-    `.calls(PLTEntry('recvfrom'))`. IDA's side meets it with a method of the same name."""
-    method: ClassVar[str]
+    """A constraint a Symbol method adds, shown as that method's call: `.calls(PLTEntry('recvfrom'))`.
+    IDA's side meets it with the method each kind marks `@SymbolResolution.constraint("calls")`."""
+    method: ClassVar[str]  # the Symbol method adding it
 
     def __str__(self) -> str:
         from elfresolver.symbols import Symbol  # symbols.py imports this module

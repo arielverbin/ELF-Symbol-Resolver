@@ -5,7 +5,6 @@ from typing import Callable, Iterable, Iterator
 import ida_bytes # type: ignore
 from elfresolver.ida.layout import Region
 from elfresolver.ida.symbols.symbol import IDASymbol
-from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import String
 
 _TEXT_MARKS = bytes(  # each byte's mark: '0' for a NUL, 't' where it may be text (printable ASCII, whitespace, or UTF-8's), 'x' elsewhere
@@ -19,18 +18,25 @@ _WHITESPACE = str.maketrans("", "", "\t\n\r")  # what a literal holds besides pr
 class IDAString(IDASymbol, kind=String):
     """A NUL-terminated string literal, named by its text."""
 
-    def all(self) -> Iterable[int]:
-        return self.literals().keys()
+    @classmethod
+    def all(cls) -> Iterable[int]:
+        return cls.literals().keys()
 
-    def owners(self, addresses: Iterable[int]) -> Iterator[int]:
-        return (address for address in addresses if address in self.literals())
+    @classmethod
+    def filter_from(cls, addresses: Iterable[int]) -> Iterator[int]:
+        return (address for address in addresses if address in cls.literals())
 
-    def names_of(self, address: int, /) -> tuple[str, ...]:
-        return (self.literals()[address],)
+    @classmethod
+    def names_of(cls, address: int, /) -> tuple[str, ...]:
+        return (cls.literals()[address],)
 
-    def describe(self, address: int, /) -> ResolvedSymbol:
-        text = self.literals()[address]
-        return self.found(address, text, len(text.encode()) + 1)
+    @classmethod
+    def display_name(cls, address: int, /) -> str | None:
+        return cls.literals()[address]
+
+    @classmethod
+    def size_of(cls, address: int, /) -> int:
+        return len(cls.literals()[address].encode()) + 1  # with its NUL
 
     @staticmethod
     @functools.cache  # one IDA has one database open

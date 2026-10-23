@@ -9,7 +9,6 @@ import idautils # type: ignore
 from elfresolver.ida.layout import Region
 from elfresolver.ida.names import SymName
 from elfresolver.ida.symbols.function import IDAFunction
-from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import PLTEntry
 
 
@@ -23,7 +22,8 @@ class _Import:
 class IDAPLTEntry(IDAFunction, kind=PLTEntry):
     """The PLT stub of an imported function, named by the import's demangled name: in full, or without its parameter list."""
 
-    def calls_from(self, entries: Iterable[int]) -> Iterator[int]:
+    @classmethod
+    def calls_from(cls, entries: Iterable[int]) -> Iterator[int]:
         """Nothing: a stub only jumps to its import, which is no function of the binary's own."""
         return iter(())
 
@@ -32,26 +32,30 @@ class IDAPLTEntry(IDAFunction, kind=PLTEntry):
         Every address referring to one of the matches: to its stub, or to its import
         (PIC code taking an import's address loads it from the GOT, whose slot points at the import).
         """
-        return self._data_refs(idautils.DataRefsTo, (address for stub in self.resolve() for address in (stub, self._imports()[stub].address)))
+        return self._data_refs(idautils.DataRefsTo, (address for stub in self.matches for address in (stub, self._imports()[stub].address)))
 
     def references_from(self) -> Iterator[int]:
         """Nothing: a stub only loads its import's GOT slot."""
         return iter(())
 
-    def all(self) -> Iterable[int]:
-        return self._imports().keys()
+    @classmethod
+    def all(cls) -> Iterable[int]:
+        return cls._imports().keys()
 
-    def owners(self, addresses: Iterable[int]) -> Iterator[int]:
+    @classmethod
+    def filter_from(cls, addresses: Iterable[int]) -> Iterator[int]:
         for address in addresses:
-            if (entry := self.function_of(address)) in self._imports():
+            if (entry := cls.function_of(address)) in cls._imports():
                 yield entry
 
-    def names_of(self, stub: int, /) -> tuple[str, ...]:
-        return self._imports()[stub].name.forms
+    @classmethod
+    def names_of(cls, stub: int, /) -> tuple[str, ...]:
+        return cls._imports()[stub].name.forms
 
-    def describe(self, stub: int, /) -> ResolvedSymbol:
-        name = self._imports()[stub].name
-        return self.found(stub, name.demangled or name.linked, ida_funcs.calc_func_size(ida_funcs.get_func(stub)))
+    @classmethod
+    def display_name(cls, stub: int, /) -> str | None:
+        name = cls._imports()[stub].name
+        return name.demangled or name.linked
 
     @staticmethod
     @functools.cache  # one IDA has one database open

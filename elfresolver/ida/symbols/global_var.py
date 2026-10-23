@@ -22,12 +22,13 @@ class IDAGlobalVar(IDASymbol, kind=GlobalVar):
         return self._data_refs(idautils.DataRefsTo, members)
 
     def references_from(self) -> Iterator[int]:
-        """Every address the matches point at: an initialized variable may hold pointers, a .bss one holds none yet."""
-        loaded = (
-            address for head in self.resolve() if ida_bytes.is_loaded(head)  # get_flags() has no FF_IVL to tell
-            for address in range(head, ida_bytes.get_item_end(head))
-        )
-        return self._data_refs(idautils.DataRefsFrom, loaded)
+        """
+        Every address the matches point at: an initialized variable may hold pointers, a .bss
+        one holds none yet. IDA keeps an item's references from its head, whichever of its
+        words holds the pointer.
+        """
+        initialized = (head for head in self.resolve() if ida_bytes.is_loaded(head))  # get_flags() has no FF_IVL to tell
+        return self._data_refs(idautils.DataRefsFrom, initialized)
 
     def all(self) -> Iterator[int]:
         for segment in Region.VARIABLES.segments():
@@ -44,7 +45,7 @@ class IDAGlobalVar(IDASymbol, kind=GlobalVar):
             if Region.of(head) is Region.VARIABLES and self._is_variable(head):
                 yield head
 
-    def describe(self, head: int) -> ResolvedSymbol:
+    def describe(self, head: int, /) -> ResolvedSymbol:
         return self.found(head, ida_name.get_name(head) or None, ida_bytes.get_item_size(head))
 
     @staticmethod
@@ -61,7 +62,7 @@ class IDAGlobalVar(IDASymbol, kind=GlobalVar):
             return True
         if not ida_bytes.is_data(flags) or ida_bytes.is_strlit(flags):
             return False
-        targets = [target for address in range(head, ida_bytes.get_item_end(head)) for target in idautils.DataRefsFrom(address)]
+        targets = list(idautils.DataRefsFrom(head))  # all of the item's (see references_from)
         return not targets or any(
             Region.of(target) is not Region.OWN_CODE or IDAFunction.function_of(target) in (target, target & ~1)  # (x86's may be odd)
             for target in targets

@@ -1,24 +1,19 @@
 from __future__ import annotations
 import functools
 import itertools
-import logging
 from typing import Callable, Iterable, Iterator
 import ida_bytes # type: ignore
 import ida_funcs # type: ignore
-import ida_ida # type: ignore
 import ida_idaapi # type: ignore
 import ida_ua # type: ignore
 import ida_xref # type: ignore
 import idautils # type: ignore
-import idc # type: ignore
+from elfresolver.constraints import Count
 from elfresolver.ida.layout import Region
 from elfresolver.ida.structure import Structure
-from elfresolver.constraints import Count
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import Function
-
-logger = logging.getLogger(__name__)
 
 _CALLS = (ida_xref.fl_CN, ida_xref.fl_CF)
 _JUMPS = (ida_xref.fl_JN, ida_xref.fl_JF)
@@ -29,13 +24,14 @@ _PC_THUNK_REGISTERS = (0x04, 0x0C, 0x14, 0x1C, 0x2C, 0x34, 0x3C)  # ModRM bytes 
 class IDAFunction(IDASymbol, kind=Function):
     """A function of the binary's own code (an import's PLT stub is an IDAPLTEntry)."""
 
+    # The constraints only a function carries.
+
     def calls(self, callee: IDAFunction, max_depth: int | None = 1) -> Iterable[int]:
-        """The functions calling `callee` (directly, by a tail jump, or through a thunk on the way), or calling one that does, `max_depth` deep."""
-        callers = lambda entries: {entry for call in callee.calls_to(entries) if (entry := self.function_of(call)) is not None}
-        return self.owners(self._reached(callee.resolve(), callers, max_depth))
+        """The functions calling `callee` (see calls_to), or calling one that does, `max_depth` deep."""
+        return self.owners(self._reached(callee.resolve(), callee.calls_to, max_depth))
 
     def called_by(self, caller: IDAFunction, max_depth: int | None = 1) -> Iterable[int]:
-        """The functions `caller` calls or tail-jumps to (past the thunks on the way), or that those call, `max_depth` deep."""
+        """The functions `caller` calls (see calls_from), or that those call, `max_depth` deep."""
         return self.owners(self._reached(caller.resolve(), caller.calls_from, max_depth))
 
     @IDASymbol.heavy
@@ -55,17 +51,17 @@ class IDAFunction(IDASymbol, kind=Function):
     # What calls functions, and what they call and refer to: from any of their instructions.
 
     def calls_to(self, entries: Iterable[int]) -> Iterator[int]:
-        """Every instruction calling one of the functions at `entries`: directly, by a tail jump, or through a thunk on the way (see _thunk_at)."""
+        """Every function calling one of those at `entries`: directly, by a tail jump, or through a thunk on the way (see _thunk_at)."""
         callees = list(entries)
         while callees:
             for xref in idautils.XrefsTo(callees.pop()):
-                if self._is_call(xref):
-                    yield xref.frm
+                if self._is_call(xref) and (caller := self.function_of(xref.frm)) is not None:
+                    yield caller
                     if (thunk := self._thunk_at(xref.frm)) is not None:
                         callees.append(thunk)  # what calls the thunk calls the callee too
 
     def calls_from(self, entries: Iterable[int]) -> Iterator[int]:
-        """Every function the functions at `entries` call or tail-jump to, past the thunks on the way (see _thunk_at)."""
+        """Every function those at `entries` call or tail-jump to, past the thunks on the way (see _thunk_at)."""
         for xref in (xref for head in self._iter_function_heads(entries) for xref in idautils.XrefsFrom(head)):
             if not self._is_call(xref):
                 continue
@@ -88,6 +84,8 @@ class IDAFunction(IDASymbol, kind=Function):
         """Every address the matches refer to, from any of their instructions (or the data inside them: an ARM literal pool)."""
         return self._data_refs(idautils.DataRefsFrom, self._iter_function_heads(self.resolve()))
 
+    # What this kind of symbol is.
+
     def all(self) -> Iterable[int]:
         return (entry for entry in idautils.Functions() if Region.of(entry) is Region.OWN_CODE)
 
@@ -96,8 +94,16 @@ class IDAFunction(IDASymbol, kind=Function):
             if (entry := self.function_of(address)) is not None and Region.of(entry) is Region.OWN_CODE:
                 yield entry
 
-    def describe(self, entry: int) -> ResolvedSymbol:
+    def describe(self, entry: int, /) -> ResolvedSymbol:
         return self.found(entry, ida_funcs.get_func_name(entry), ida_funcs.calc_func_size(ida_funcs.get_func(entry)))
+
+    # Reading functions.
+
+    @staticmethod
+    def function_of(address: int) -> int | None:
+        """The entry of the function `address` belongs to (in any of its chunks), if one does."""
+        function = ida_funcs.get_func(address)
+        return function.start_ea if function is not None else None
 
     @staticmethod
     def _iter_function_heads(entries: Iterable[int]) -> Iterator[int]:
@@ -107,30 +113,8 @@ class IDAFunction(IDASymbol, kind=Function):
                 yield from idautils.Heads(start, end)
 
     @staticmethod
-    @functools.cache  # one IDA has one database open
-    def _constants_of(entry: int) -> frozenset[int]:
-        """
-        Every integer the function at `entry` uses, as wide as it uses it: its instructions'
-        immediate operands (IDA joins aarch64's MOVZ/MOVK and ARM's MOVW/MOVT into one MOV),
-        and the words they load from a literal pool inside code.
-        """
-        constants = set()
-        instruction = ida_ua.insn_t()
-        for head in IDAFunction._iter_function_heads([entry]):
-            if not ida_bytes.is_code(ida_bytes.get_flags(head)) or ida_ua.decode_insn(instruction, head) <= 0:
-                continue
-            for operand in itertools.takewhile(lambda operand: operand.type != ida_ua.o_void, instruction.ops):
-                if operand.type == ida_ua.o_imm:
-                    constants.add(operand.value & (1 << 8 * ida_ua.get_dtype_size(operand.dtype)) - 1)
-            for pool in idautils.DataRefsFrom(head):
-                size = ida_bytes.get_item_size(pool)
-                if Region.of(pool) is Region.OWN_CODE and ida_bytes.is_data(ida_bytes.get_flags(pool)) and size in (4, 8):
-                    constants.add(ida_bytes.get_qword(pool) if size == 8 else ida_bytes.get_dword(pool))
-        return frozenset(constants)
-
-    @staticmethod
     def _reached(start: Iterable[int], step: Callable[[set[int]], Iterable[int]], max_depth: int | None) -> set[int]:
-        """The functions `step` leads to from those at `start` (it calls, or is called by), in up to `max_depth` steps (None: any number)."""
+        """The functions `step` leads to from those at `start` (those they call, or are called by), in up to `max_depth` steps (None: any number)."""
         reached, frontier = set(), set(start)
         for _ in range(max_depth) if max_depth is not None else itertools.count():
             frontier = set(step(frontier)) - reached
@@ -140,10 +124,20 @@ class IDAFunction(IDASymbol, kind=Function):
         return reached
 
     @staticmethod
-    def function_of(address: int) -> int | None:
-        """The entry of the function `address` belongs to (in any of its chunks), if one does."""
-        function = ida_funcs.get_func(address)
-        return function.start_ea if function is not None else None
+    @functools.cache  # one IDA has one database open
+    def _constants_of(entry: int) -> frozenset[int]:
+        """
+        Every integer the function at `entry` uses, as wide as it uses it: its instructions'
+        immediates and displacements (x86 adds 0xB as `lea rax, [rdi+0Bh]`; IDA joins
+        aarch64's MOVZ/MOVK and ARM's MOVW/MOVT into one MOV), and the words of its literal
+        pools (data inside it, which its instructions load).
+        """
+        constants = set()
+        for head in IDAFunction._iter_function_heads([entry]):
+            flags = ida_bytes.get_flags(head)
+            if ida_bytes.has_immd(flags) or ida_bytes.is_data(flags):
+                constants.update(ida_ua.get_immvals(head, ida_bytes.OPND_ALL, flags))
+        return frozenset(constants)
 
     @staticmethod
     def _is_call(xref: idautils._xref) -> bool:
@@ -177,49 +171,3 @@ class IDAFunction(IDASymbol, kind=Function):
             return function.start_ea
         target, _ = ida_funcs.calc_thunk_func_target(function)
         return function.start_ea if Region.of(target) in (Region.OWN_CODE, Region.PLT) else None
-
-    # Where IDA's auto-analysis falls short, once it's done.
-
-    @staticmethod
-    def make_functions_of_thumb_pointers() -> None:
-        """Let IDA explore skipped bytes due to Thumb code (32-bit ARM, where such a
-        pointer is the address plus one). It solves an issue where IDA doesn't follow main's,
-        which _start loads from the GOT: without this, main is no function, and neither is
-        any function only main calls."""
-        if ida_ida.inf_get_procname() != "ARM" or ida_ida.inf_is_64bit():
-            return
-        for segment in (segment for region in (Region.GOT, Region.VARIABLES, Region.OTHER) for segment in region.segments()):
-            for head in idautils.Heads(segment.start_ea, segment.end_ea):
-                for target in idautils.DataRefsFrom(head):
-                    entry = target - 1
-                    if target & 1 and Region.of(entry) is Region.OWN_CODE and ida_bytes.is_unknown(ida_bytes.get_flags(entry)):
-                        idc.split_sreg_range(entry, "T", 1, idc.SR_user)
-                        if ida_funcs.add_func(entry):
-                            logger.debug("Made a Thumb function of %#x, which %#x points at", entry, head)
-
-    @staticmethod
-    def separate_tail_called_functions() -> None:
-        """Treat tail-called functions as separate functions instead of a chunk.
-
-        Tail-called functions are called using an unconditional jump from another chunk,
-        without pushing a return address - so a return on the tail-called function exists
-        both the tail-called function and its caller together."""
-        for entry in list(idautils.Functions()):
-            chunks = list(idautils.Chunks(entry))
-            for start, end in chunks:
-                if start == entry:
-                    continue
-                others = [range(begin, finish) for begin, finish in chunks if begin != start]
-                tail_jumped_into = any(
-                    xref.type in _JUMPS and any(xref.frm in other for other in others)
-                    and not any(flow.type == ida_xref.fl_F for flow in idautils.XrefsFrom(xref.frm))  # nothing flows on from it
-                    for xref in idautils.XrefsTo(start)
-                )
-                if not tail_jumped_into or any(  # a cold path jumps back, as a branch enters it
-                    xref.type in _JUMPS and any(xref.to in other for other in others)
-                    for head in idautils.Heads(start, end) for xref in idautils.XrefsFrom(head)
-                ):
-                    continue
-                if ida_funcs.remove_func_tail(ida_funcs.get_func(entry), start):
-                    ida_funcs.add_func(start)
-                    logger.debug("Made a function of %#x, which IDA had folded into %#x", start, entry)

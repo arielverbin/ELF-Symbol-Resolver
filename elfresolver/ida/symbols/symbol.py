@@ -12,7 +12,6 @@ from elfresolver.ida.layout import Region
 from elfresolver.ida.names import SymName
 from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.symbols import Symbol
-
 if TYPE_CHECKING:
     from elfresolver.ida.resolution import SymbolResolution
 
@@ -27,7 +26,10 @@ class IDASymbol(ABC):
     kinds: ClassVar[dict[type[Symbol], type[IDASymbol]]] = {}  # each kind of Symbol, and the IDASymbol resolving it
 
     def __init_subclass__(cls, kind: type[Symbol] | None = None, **kwargs: Any) -> None:
-        """`class IDAFunction(IDASymbol, kind=Function)`: a Function resolves as an IDAFunction."""
+        """
+        Subclasses mark which `Symbol` they solve.
+        `class IDAFunction(IDASymbol, kind=Function)`: a Function resolves as an IDAFunction.
+        """
         super().__init_subclass__(**kwargs)
         if kind is not None:
             IDASymbol.kinds[kind] = cls
@@ -41,9 +43,13 @@ class IDASymbol(ABC):
     def heavy(method: _Method) -> _Method:
         """
         Marks a constraint's method as heavy: one checking candidates one by one. It runs
-        after the light ones, given what they left as `candidates` (every symbol of the
-        kind, if all are heavy), and keeps those of them it allows.
+        after the light ones, given what they left as `candidates`, letting them run their
+        logic only on a reduced number of symbols.
         """
+        # TODO: create IDASymbol.constraint decorator, for better readabily of 'which functions can be invoked as a constraint',
+        # the decorator will mark the method name invoking it from constraint.py, so the function name alone would not have to implicitly match
+        # also support specifying HOW heavy they are, instead of @heavy decorator alone.
+        # i.e, @IDASymbol.constraint(method="matching", heavy=3)
         method.heavy = True  # type: ignore[attr-defined]
         return method
 
@@ -101,22 +107,32 @@ class IDASymbol(ABC):
 
     @abstractmethod
     def owners(self, addresses: Iterable[int]) -> Iterable[int]:
+        # TODO: rename to parse_from_addresses? yield_syms?
+        # also, this is a classmethod, no? the addresses are given; they intoduce general logic to identify the class objects.
         """The symbols of this kind `addresses` belong to: an instruction's function, a byte's variable."""
 
     @abstractmethod
-    def describe(self, address: int) -> ResolvedSymbol:
+    def describe(self, address: int, /) -> ResolvedSymbol:
+        # TODO: perhaps merge with owners; owners take a list of addresses and yield a ResolvedSymbol, and rename them to `parse_from_addresses`, or `parse_from`.
         """The symbol at `address`, as resolve() hands it to the user (see found)."""
 
-    def names_of(self, address: int) -> tuple[str, ...]:
-        """Every name the symbol at `address` answers to: the forms of IDA's name for it (see Name.forms), if it has one."""
+    def names_of(self, address: int, /) -> tuple[str, ...]:
+        """Every name the symbol at `address` answers to: the forms of IDA's name for it (see SymName.forms), if it has one."""
         name = ida_name.get_name(address)
         return SymName(name).forms if name else ()
 
     def found(self, address: int, name: str | None, size: int) -> ResolvedSymbol:
         """This symbol, found at `address`, named `name` and `size` bytes long."""
+        # TODO: the function should only be called from inside describe. yet its part of the public API for some reason.
+        # either remove it and duplicate its line for every implementation of describe, or rename to `_build_sym` or something
         return ResolvedSymbol(self.symbol, address, address - ida_nalt.get_imagebase(), name, size)
 
     def _step_resolve(self, constraint: IDAConstraint, candidates: frozenset[int] | None) -> frozenset[int]:
+        # TODO: should this logic sit in symbol.py, or in resolution.py?
+        # The current design might intoduce bugs by developers accidently uses `value.resolve()` intead of `self._resolution.resolve(value)`
+        # The fact that `_resolution` feels optional like that is a design flaw. 
+        # Perhaps move all of heavy decorator, `.resolve()`, `._step_resolve()` to resolution.py, and let the symbols only implement their
+        # constraint logic.
         """What `constraint` leaves of `candidates` (None: every symbol of this kind). The
         symbols in it resolve first, so a cancel is noticed between them."""
         arguments = [
@@ -124,11 +140,10 @@ class IDASymbol(ABC):
             for value in vars(constraint).values()
         ]
 
-        # give runtime for `interrupted` to check if a cancellation occured (we
-        # cannot be multithreaded inside IDA :/)
+        # give `interrupted` a chance to notice a cancel (IDA's side runs on one thread: nothing else would)
         self._resolution.stop_if_cancelled()
 
-        # call the constaint method (i.e, `.calls`, `.matching` etc...): a heavy one, on the candidates left
+        # call the constraint's method (`.calls`, `.matching`, ...): a heavy one, on the candidates left
         method = getattr(self, constraint.method)
         if self._is_heavy(constraint):
             allowed = frozenset(method(*arguments, candidates=frozenset(self.all()) if candidates is None else candidates))
@@ -143,6 +158,12 @@ class IDASymbol(ABC):
 
     def _each(self, candidates: Iterable[int]) -> Iterator[int]:
         """`candidates` one by one, for a heavy constraint to check: stopping the resolve once the resolver cancels it."""
+        # TODO: I understand its purpose, while iterating over candidates on heavy contraints we need a change to check stop_if_cancelled
+        # but I don't like how stop_if_cancelled is being checked in two different places. 
+        # perhaps: a heavy constraint receives a single candidate
+        # and checks only this one. so _step_resolve can perform the iteration itself, and check stop_if_cancelled on each candidate.
+        # that way we don't see en iteration over the candidates everywhere (each constraint only performs its logic)
+        # and the check_if_cancelled is centralized inside _step_resolve.
         for candidate in candidates:
             self._resolution.stop_if_cancelled()
             yield candidate

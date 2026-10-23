@@ -17,12 +17,12 @@ class Serializable:
         Serializable._classes[cls.__name__] = cls
 
     def serialize(self) -> bytes:
-        return json.dumps(_written(self)).encode()
+        return json.dumps(self._to_json(self)).encode()
 
     @classmethod
     def from_serialized(cls, data: str | bytes) -> Self:
         """The value `data` is the serialization of. Raises ValueError if that isn't a `cls`."""
-        value = _read(json.loads(data))
+        value = Serializable._from_json(json.loads(data))
         if not isinstance(value, cls):
             raise ValueError(f"Not a {cls.__name__}: {value!r}")
         return value
@@ -36,24 +36,26 @@ class Serializable:
         """The value written as `values` (see to_fields)."""
         return cls(**values)
 
+    @staticmethod
+    def _to_json(value: object) -> object:
+        """`value` as JSON holds it: a Serializable as its fields and its class's name, a sequence as a list."""
+        match value:
+            case Serializable():
+                return {"type": type(value).__name__, **{name: Serializable._to_json(item) for name, item in value.to_fields().items()}}
+            case tuple() | list():
+                return [Serializable._to_json(item) for item in value]
+            case _:
+                return value
 
-def _written(value: object) -> object:
-    match value:
-        case Serializable():
-            return {"type": type(value).__name__, **{name: _written(item) for name, item in value.to_fields().items()}}
-        case tuple() | list():
-            return [_written(item) for item in value]
-        case _:
-            return value
-
-
-def _read(value: object) -> object:
-    match value:
-        case {"type": str(name), **values}:
-            if (cls := Serializable._classes.get(name)) is None:
-                raise ValueError(f"Nothing serializable is named {name!r}")
-            return cls.from_fields({key: _read(item) for key, item in values.items()})
-        case list():
-            return tuple(_read(item) for item in value)
-        case _:
-            return value
+    @staticmethod
+    def _from_json(value: object) -> object:
+        """The value JSON holds as `value` (see _to_json): a list comes back a tuple, as values are immutable."""
+        match value:
+            case {"type": str(name), **values}:
+                if (cls := Serializable._classes.get(name)) is None:
+                    raise ValueError(f"Nothing serializable is named {name!r}")
+                return cls.from_fields({key: Serializable._from_json(item) for key, item in values.items()})
+            case list():
+                return tuple(Serializable._from_json(item) for item in value)
+            case _:
+                return value

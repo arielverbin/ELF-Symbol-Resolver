@@ -13,7 +13,7 @@ as IDA would show an ELF:
     extern   an import for each PLT stub, where IDA puts them
 
 Each symbol is one item, so one head: a function's calls and references all go
-from its entry, which decodes as one instruction with its constants as operands.
+from its entry, which holds its constants as one instruction's immediates.
 There is no decompiler.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ _EXTERN = 0x7F000000  # where the imports go: far from any address a test picks
 _SEGMENTS = {"Function": ".text", "PLTEntry": ".plt", "String": ".rodata", "GlobalVar": ".data"}
 
 # An item's flags, as get_flags() gives them (for the is_* and has_* functions to read).
-_CODE, _DATA, _STRLIT, _VALUE, _XREF = 1, 2, 4, 8, 16
+_CODE, _DATA, _STRLIT, _VALUE, _XREF, _IMMD = 1, 2, 4, 8, 16, 32
 
 
 @dataclass(frozen=True)
@@ -58,21 +58,6 @@ class Xref:
     frm: int
     to: int
     type: int
-
-
-@dataclass(frozen=True)
-class Operand:
-    """An instruction's operand, as ida_ua shows one."""
-    type: int
-    value: int = 0
-    dtype: int = 7  # dt_qword
-
-
-class Instruction:
-    """An instruction, as ida_ua shows one (insn_t): decode_insn() fills its operands, up to an o_void one."""
-
-    def __init__(self) -> None:
-        self.ops: list[Operand] = []
 
 
 class CtreeVisitor:
@@ -109,8 +94,8 @@ class FakeIDA:
     fl_CF, fl_CN, fl_JF, fl_JN, fl_F = 16, 17, 18, 19, 21
     dr_O = 1
     segment_t = Segment
-    o_void, o_imm = 0, 5
-    insn_t = Instruction
+    FF_REF = _XREF
+    OPND_ALL = 15
     ctree_visitor_t = CtreeVisitor
     DecompilationFailure = DecompilationFailure
     CV_FAST = 0
@@ -129,6 +114,8 @@ class FakeIDA:
                 self._add(_Item(address, symbol.size, _DATA | _STRLIT | _VALUE, "", segment))
             else:
                 flags = _CODE | _VALUE if symbol.kind == "Function" else _DATA | _VALUE
+                if any(function == address for function, _ in self.binary.constants):
+                    flags |= _IMMD
                 self._add(_Item(address, symbol.size, flags, symbol.name or "", segment))
         self._xrefs = [Xref(caller, callee, self.fl_CN) for caller, callee in self.binary.calls]
         self._xrefs += [Xref(source, target, self.dr_O) for source, target in self.binary.references]
@@ -197,6 +184,9 @@ class FakeIDA:
     def has_xref(self, flags: int) -> bool:
         return bool(flags & _XREF)
 
+    def has_immd(self, flags: int) -> bool:
+        return bool(flags & _IMMD)
+
     def get_item_head(self, ea: int) -> int:
         item = self._item_at(ea)
         return item.start if item is not None else ea
@@ -228,16 +218,8 @@ class FakeIDA:
 
     # ida_ua
 
-    def decode_insn(self, instruction: Instruction, ea: int) -> int:
-        item = self._items.get(ea)
-        if item is None or not item.flags & _CODE:
-            return 0
-        constants = [Operand(self.o_imm, value) for function, value in self.binary.constants if function == ea]
-        instruction.ops = [*constants, Operand(self.o_void)]
-        return item.size
-
-    def get_dtype_size(self, dtype: int) -> int:
-        return {0: 1, 1: 2, 2: 4, 7: 8}[dtype]
+    def get_immvals(self, ea: int, operand: int, flags: int) -> list[int]:
+        return [value for function, value in self.binary.constants if function == ea]
 
     # ida_hexrays
 
@@ -338,7 +320,7 @@ class FakeIDA:
 _MODULES = {
     "ida_auto": ["auto_wait"],
     "ida_bytes": [
-        "get_flags", "is_code", "is_data", "is_unknown", "is_strlit", "has_xref",
+        "get_flags", "is_code", "is_data", "is_unknown", "is_strlit", "has_xref", "has_immd", "FF_REF", "OPND_ALL",
         "get_item_head", "get_item_end", "get_item_size", "is_loaded", "get_bytes", "get_qword", "get_dword",
     ],
     "ida_hexrays": [
@@ -352,7 +334,7 @@ _MODULES = {
     "ida_nalt": ["get_imagebase"],
     "ida_name": ["get_name", "demangle_name"],
     "ida_pro": ["qexit"],
-    "ida_ua": ["insn_t", "decode_insn", "get_dtype_size", "o_void", "o_imm"],
+    "ida_ua": ["get_immvals"],
     "ida_segment": ["getseg", "get_segm_name", "get_segm_qty", "getnseg", "segment_t", "SEG_CODE", "SEG_DATA", "SEG_XTRN"],
     "ida_xref": ["fl_CF", "fl_CN", "fl_JF", "fl_JN", "fl_F", "dr_O"],
     "idautils": ["Functions", "Chunks", "Heads", "Names", "XrefsFrom", "XrefsTo", "DataRefsFrom", "DataRefsTo"],

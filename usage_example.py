@@ -8,6 +8,7 @@ Needs gcc, and IDA running Python 3.11 or newer (see idapyswitch).
 """
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 from elfresolver import ELFResolver
 from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
@@ -43,7 +44,7 @@ int main(void) {
 def compile_stripped(source: str, directory: Path) -> Path:
     """Compile C source into an executable with no symbol names left to go by."""
     binary = directory / "server"
-    subprocess.run(["gcc", "-O2", "-x", "c", "-", "-o", str(binary)], input=source.encode(), check=True)
+    subprocess.run(["x86_64-linux-gnu-gcc", "-O2", "-x", "c", "-", "-o", str(binary)], input=source.encode(), check=True)
     subprocess.run(["strip", str(binary)], check=True)
     return binary
 
@@ -58,25 +59,32 @@ def main() -> None:
     parser = Function().called_by(reader)
     counter = GlobalVar().referenced_by(parser)
 
-    binary = "server.out"
+    with tempfile.TemporaryDirectory() as directory:
+        binary = compile_stripped(SOURCE, Path(directory))
 
-    # The first run on a binary waits for IDA's auto-analysis. Its database
-    # is then cached, so later runs on the same binary start in seconds.
-    # Ctrl+C cancels a resolve under way, and the resolver goes on.
-    with ELFResolver(binary) as resolver:
-        for name, symbol in [("read_request", reader), ("parse_request", parser), ("requests_served", counter)]:
-            found = resolver.resolve(symbol)  # `reader` is resolved once: then answered from memory
-            print(f"{name:<16} at offset {found.offset:#x} (IDA calls it {found.name})")
+        # The first run on a binary waits for IDA's auto-analysis. Its database
+        # is then cached, so later runs on the same binary start in seconds.
+        # Ctrl+C cancels a resolve under way, and the resolver goes on.
+        with ELFResolver(binary) as resolver:
+            founds = []
+            for name, symbol in [("read_request", reader), ("parse_request", parser), ("requests_served", counter)]:
+                founds.append(resolver.resolve(symbol))  # `reader` is resolved once: then answered from memory
 
-        # resolve() wants exactly one match; resolve_all() takes them all.
-        for string in resolver.resolve_all(String().matching("input|request")):
+            # resolve() wants exactly one match; resolve_all() takes them all.
+            strings = resolver.resolve_all(String().matching("input|request"))
+
+            # When nothing matches, the error tells which nested symbol matched nothing.
+            try:
+                founds.append(resolver.resolve(Function().calls(PLTEntry("sendto")).references(String("enter input"))))
+            except SymbolNotFoundError as error:
+                print(error)
+
+        for string in strings:
             print(f"a string at offset {string.offset:#x}: {string.name!r}")
 
-        # When nothing matches, resolve() raises SymbolNotFoundError (several matches: AmbiguousSymbolError).
-        try:
-            resolver.resolve(Function().calls(PLTEntry("sendto")).references(String("enter input")))
-        except SymbolNotFoundError as error:
-            print(error)
+        for found in founds:
+            print(f"{name:<16} at offset {found.offset:#x} (IDA calls it {found.name})")
+
 
 
 if __name__ == "__main__":

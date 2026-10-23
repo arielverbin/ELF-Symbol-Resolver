@@ -60,7 +60,7 @@ nest them.
 | `.referenced_by(symbol)`  | every kind  | has its address referred to by `symbol`                             |
 | `.calls(function, max_depth=1)` | `Function` | calls `function`: directly, by a tail jump, or through a thunk; with a `max_depth` above 1 (None: any), through functions calling it too |
 | `.called_by(function, max_depth=1)` | `Function` | is called by `function`; with a `max_depth` above 1 (None: any), by the functions it calls too |
-| `.uses_const(value)`      | `Function`  | uses the integer `value`: as an instruction's operand (of any width it fits: `-1` is `0xFFFFFFFF` in 32 bits), or from a literal pool |
+| `.uses_const(value)`      | `Function`  | uses the integer `value`: as an instruction's immediate or displacement (of any width it fits: `-1` is `0xFFFFFFFF` in 32 bits), or from a literal pool |
 | `.structured_with(loops=, ifs=, switch_cases=)` | `Function` | has these in its decompiled code (Hex-Rays'): each a count, or `(at least, at most)` with `None` for unbounded |
 
 `resolve(symbol)` returns its one match, a `ResolvedSymbol` with an `address` (as linked), an
@@ -125,10 +125,12 @@ uses it: a struct whose fields are read may be one item per field, and an array 
 the slot holding the handler's pointer, inside the table; `resolve_all()` gets every item a
 function reads.
 
-A `VTable` is a whole table: its offset to top, its typeinfo, its virtual functions' pointers,
-and its secondary tables' (multiple inheritance), as `nm -S` sizes it. It is found through the
-class's RTTI, a typeinfo name pointed at by a typeinfo a table points at, or by a `_ZTV` name
-(as a shared object exports). So `Function().referenced_by(VTable("geo::Polygon"))` finds all of
+A `VTable` is a whole vtable group, as `nm -S` sizes it: its primary table (vcall and vbase
+offsets, offset to top, typeinfo, then the virtual functions' pointers), and a secondary table
+for each base past the first. It is found through the class's RTTI (a typeinfo name, pointed at
+by a typeinfo, pointed at by the table), or by a `_ZTV` symbol (as a shared object exports, and
+IDA names those whose RTTI it parsed). Every vtable libstdc++ exports is found this way, each at
+its symbol's address, with its symbol's size. So `Function().referenced_by(VTable("geo::Polygon"))` finds all of
 its virtual functions, `VTable().references(method)` the tables holding `method`, and
 `Function().references(VTable("net::EchoHandler"))` the code making or unmaking its objects.
 
@@ -153,9 +155,9 @@ tables or chains of compares, ifs made branchless): bounds outlast exact counts.
   `0xDEECE66D` and `5`), and a division by a constant is a multiplication by another.
 - **Decompiled structure** needs IDA's Hex-Rays decompiler for the binary's processor:
   without it, `.structured_with()` raises an `IDAError` saying so.
-- **VTables** need RTTI or an exported `_ZTV` name (`-fno-rtti` and stripped finds none). A
-  virtual base's vcall and vbase offsets, before the offset to top, aren't counted in its size,
-  and a construction vtable (`_ZTC`) of base `B` isn't told apart from `B`'s.
+- **VTables** need RTTI or a `_ZTV` symbol (`-fno-rtti` and stripped finds none). Without a
+  symbol, a table with virtual bases starts at its offset to top (past its vcall and vbase
+  offsets), and a construction vtable of base `B` isn't told apart from `B`'s own.
 
 ---
 
@@ -166,20 +168,23 @@ tables or chains of compares, ifs made branchless): bounds outlast exact counts.
  ┌───────────────────────────┐  loopback TCP   ┌────────────────────────────────┐
  │ elfresolver.resolver      │◀── JSON frames ─▶│ elfresolver.ida                │
  │   ELFResolver             │                  │   bootstrap → server           │
- │   IDASession              │                  │     → resolution → symbols/    │
+ │   IDASession              │                  │     → analysis                 │
+ │   IDAInstallation         │                  │     → resolution → symbols/    │
  │   DatabaseCache           │                  │                                │
  └─────────────┬─────────────┘                  └───────────────┬────────────────┘
                └──────▶ symbols · constraints · protocol ◀──────┘
 ```
 
-`ELFResolver` starts `idat` headless on the binary with `elfresolver/ida/bootstrap.py`, which
-puts the resolver's own copy of elfresolver on IDA's `sys.path`. Then the conversation goes:
+`ELFResolver` finds IDA (`IDAInstallation`) and starts `idat` headless on the binary with
+`elfresolver/ida/bootstrap.py`, which puts the resolver's own copy of elfresolver on IDA's
+`sys.path`. Then the conversation (`IDASession`) goes:
 
 1. The resolver listens on a free loopback port (TCP works the same on Windows), and passes IDA
    the launch through its environment: the port to connect back to, and a token.
 2. IDA connects back and says Hello, echoing the token, which only the IDA the resolver started
    knows. If the first connection doesn't, starting fails.
-3. IDA says Ready once its auto-analysis is done.
+3. IDA says Ready once its auto-analysis is done, and completed where it falls short
+   (`AutoAnalysis`: Thumb code only a pointer leads to, functions folded into their callers).
 4. IDA answers each symbol it's sent. Every request carries a token of its own, which its answer echoes.
 5. On leaving the `with` block, the resolver asks IDA to shut down.
 
@@ -208,6 +213,26 @@ SHA-256 of its content, under `$ELFRESOLVER_CACHE` (by default, the platform's c
 Only the first run on a binary waits for auto-analysis. Entries are never opened in place:
 IDA works on a copy, so neither concurrent resolvers nor a crashed IDA can corrupt one. A
 database is stored only after its IDA exited cleanly.
+
+---
+
+## Performance
+
+IDA's auto-analysis is the slow part, and it happens once per binary: the database is cached.
+Measured with IDA 9.2 on Ubuntu's aarch64 builds of each binary:
+
+| Query                                         | dash (0.2 MB) | libstdc++ (2.7 MB) | gdb (12 MB) |
+|-----------------------------------------------|---------------|--------------------|-------------|
+| First analysis, then opening the cached database | 1.8s, 0.5s | 12s, 0.7s          | 95s, 1.3s   |
+| Every string; every global                    | 0.01s; 0.02s  | 0.13s; 0.14s       | 1.4s; 1.3s  |
+| Every vtable (once the strings are read)      | 0s            | 0.03s              | 0.07s       |
+| The callers of `malloc`; at any depth         | 0s; 0.01s     | 0s; 0.16s          | 0.01s; 0.7s |
+| A constant, in every function                 | 0.03s         | 0.5s               | 3.0s        |
+| Decompiling a function (`.structured_with()`) |               |                    | 0.5s each   |
+
+A constraint relating to an anchor (an import, a string) takes milliseconds, whatever the
+binary's size. A heavy one costs per candidate, so give it anchors: `.structured_with()` on
+the 360 functions calling `malloc` in gdb takes 3 minutes, on a handful a few seconds.
 
 ---
 

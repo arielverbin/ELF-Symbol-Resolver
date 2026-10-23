@@ -70,7 +70,7 @@ class ReferencedBy(IDAConstraint):
 
 @dataclass(frozen=True)
 class UsesConst(IDAConstraint):
-    """The function uses the integer `value` in its code: as an instruction's operand, or loaded from a literal pool."""
+    """The function uses the integer `value` in its code: as an instruction's immediate or displacement, or from a literal pool."""
     value: int
     method: ClassVar[str] = "uses_const"
 

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Structure:
-    """What a function's decompiled code is made of: its loops (for, while, do), ifs,and switch cases other than default."""
+    """What a function's decompiled code is made of: its loops (for, while, do), ifs, and switch cases other than default."""
     loops: int
     ifs: int
     switch_cases: int

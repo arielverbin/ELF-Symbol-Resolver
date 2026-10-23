@@ -36,14 +36,14 @@ def test_a_message_comes_back_as_it_was_sent(message):
 
 
 def test_a_symbol_comes_back_hashable_and_equal():
-    resolve = Message.from_serialized(ResolveRequest(SYMBOL).serialize())
+    resolve = ResolveRequest.from_serialized(ResolveRequest(SYMBOL).serialize())
     assert resolve.symbol == SYMBOL
     assert hash(resolve.symbol) == hash(SYMBOL)
 
 
 def test_a_symbol_comes_back_with_its_id():
     """So IDA's logs name a symbol, and every symbol in it, as the resolver's side does."""
-    resolve = Message.from_serialized(ResolveRequest(SYMBOL).serialize())
+    resolve = ResolveRequest.from_serialized(ResolveRequest(SYMBOL).serialize())
     assert repr(resolve.symbol) == repr(SYMBOL)
 
 

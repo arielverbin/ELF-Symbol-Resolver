@@ -1,7 +1,6 @@
 """Tests for the database cache: databases are kept by binary content, and handed out as copies."""
 from pathlib import Path
 from elfresolver import DatabaseCache
-from elfresolver.resolver.database_cache import default_directory
 
 
 def _write(path: Path, content: bytes) -> Path:
@@ -39,5 +38,5 @@ def test_storing_leaves_no_staged_files_behind(tmp_path, cache):
 
 def test_the_default_directory_is_configurable(monkeypatch, tmp_path):
     monkeypatch.setenv("ELFRESOLVER_CACHE", str(tmp_path))
-    assert default_directory() == tmp_path
+    assert DatabaseCache.default_directory() == tmp_path
     assert DatabaseCache().directory == tmp_path

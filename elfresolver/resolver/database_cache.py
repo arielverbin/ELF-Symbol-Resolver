@@ -16,7 +16,7 @@ class DatabaseCache:
     stored only once its IDA has exited cleanly, and atomically."""
 
     def __init__(self, directory: str | os.PathLike | None = None) -> None:
-        self.directory = Path(directory) if directory is not None else default_directory()
+        self.directory = Path(directory) if directory is not None else self.default_directory()
 
     def copy_to(self, binary: Path, destination: Path) -> bool:
         """Copy the database of `binary` to `destination`; False if none is stored."""
@@ -34,20 +34,21 @@ class DatabaseCache:
         shutil.move(database, staged)
         os.replace(staged, entry)
 
+    @staticmethod
+    def default_directory() -> Path:
+        """$ELFRESOLVER_CACHE, else elfresolver's directory in the platform's cache directory."""
+        if configured := os.environ.get("ELFRESOLVER_CACHE"):
+            return Path(configured)
+        if sys.platform == "win32":
+            caches = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        elif sys.platform == "darwin":
+            caches = Path.home() / "Library" / "Caches"
+        else:
+            caches = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        return caches / "elfresolver"
+
     def _entry_of(self, binary: Path) -> Path:
+        """Where the database of `binary` is kept: by the SHA-256 of its content."""
         with open(binary, "rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
         return self.directory / f"{digest}.i64"
-
-
-def default_directory() -> Path:
-    """$ELFRESOLVER_CACHE, else elfresolver's directory in the platform's cache directory."""
-    if configured := os.environ.get("ELFRESOLVER_CACHE"):
-        return Path(configured)
-    if sys.platform == "win32":
-        caches = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    elif sys.platform == "darwin":
-        caches = Path.home() / "Library" / "Caches"
-    else:
-        caches = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return caches / "elfresolver"

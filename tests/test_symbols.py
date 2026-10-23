@@ -10,7 +10,7 @@ Tests for the symbols: the values a resolver is asked to find.
 import re
 import pytest
 from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
-from elfresolver.constraints import Calls, Matching, References
+from elfresolver.constraints import CalledBy, Calls, Matching, References
 
 READER = Function().calls(PLTEntry("recvfrom")).references(String("enter input"))
 
@@ -69,13 +69,13 @@ def test_every_symbol_has_an_id_of_its_own():
 def test_a_plt_entry_is_a_function():
     """It has a function's constraint methods, and can be called."""
     assert isinstance(PLTEntry("recvfrom"), Function)
-    assert PLTEntry().called_by(READER).constraints[0].caller == READER
+    assert PLTEntry().called_by(READER).constraints == (CalledBy(READER),)
 
 
 @pytest.mark.parametrize("build", [
-    lambda: Function().calls(String("enter input")),
-    lambda: Function().called_by(GlobalVar()),
-    lambda: Function().references("enter input"),
+    lambda: Function().calls(String("enter input")),  # type: ignore[arg-type]
+    lambda: Function().called_by(GlobalVar()),  # type: ignore[arg-type]
+    lambda: Function().references("enter input"),  # type: ignore[arg-type]
 ])
 def test_an_argument_of_the_wrong_kind_raises_where_it_is_written(build):
     with pytest.raises(TypeError, match=r"takes a (Function|Symbol), not"):
@@ -96,10 +96,10 @@ def test_a_default_goes_unsaid_in_a_repr():
 
 @pytest.mark.parametrize("build", [
     lambda: Function().calls(Function(), max_depth=0),
-    lambda: Function().called_by(Function(), max_depth=1.5),
+    lambda: Function().called_by(Function(), max_depth=1.5),  # type: ignore[arg-type]
     lambda: Function().structured_with(),
     lambda: Function().structured_with(loops=-1),
-    lambda: Function().structured_with(ifs=(1, 2, 3)),
+    lambda: Function().structured_with(ifs=(1, 2, 3)),  # type: ignore[arg-type]
 ], ids=["no depth", "a fractional depth", "no count", "a negative count", "three bounds"])
 def test_a_malformed_argument_raises_where_it_is_written(build):
     with pytest.raises(ValueError):

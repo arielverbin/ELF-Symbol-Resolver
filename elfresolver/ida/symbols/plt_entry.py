@@ -46,10 +46,10 @@ class IDAPLTEntry(IDAFunction, kind=PLTEntry):
             if (entry := self.function_of(address)) in self._imports():
                 yield entry
 
-    def names_of(self, stub: int) -> tuple[str, ...]:
+    def names_of(self, stub: int, /) -> tuple[str, ...]:
         return self._imports()[stub].name.forms
 
-    def describe(self, stub: int) -> ResolvedSymbol:
+    def describe(self, stub: int, /) -> ResolvedSymbol:
         name = self._imports()[stub].name
         return self.found(stub, name.demangled or name.linked, ida_funcs.calc_func_size(ida_funcs.get_func(stub)))
 

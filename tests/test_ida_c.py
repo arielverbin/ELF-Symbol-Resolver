@@ -110,6 +110,29 @@ KEEP unsigned fnv1a(const char *text) {
     return hash;
 }
 
+// A constant built in two halves, which aarch64's -O2 schedules apart (a MOVZ, then a MOVK).
+KEEP unsigned crc32(const unsigned char *data, unsigned length) {
+    unsigned crc = 0xFFFFFFFFu;
+    for (unsigned i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
+    }
+    return ~crc;
+}
+
+// A register overwritten between a constant's two halves (in assembly: no compiler would): the
+// halves never make 0x56781234.
+KEEP unsigned overwritten_half(unsigned x) {
+    unsigned result = x;
+#if defined(__aarch64__)
+    __asm__("mov %w0, #0x1234\n\tmov %w0, %w1\n\tmovk %w0, #0x5678, lsl #16" : "=&r"(result) : "r"(x));
+#elif defined(__arm__)
+    __asm__("movw %0, #0x1234\n\tmov %0, %1\n\tmovt %0, #0x5678" : "=&r"(result) : "r"(x));
+#endif
+    return result;
+}
+
 // A call to a function that never returns.
 KEEP __attribute__((noreturn)) void die(const char *why) { fprintf(stderr, "dying: %s\n", why); exit(1); }
 KEEP int checked_divide(int a, int b) { if (b == 0) die("division by zero"); return a / b; }
@@ -127,7 +150,8 @@ int main(int argc, char **argv) {
     install_handlers();
     printf("%p\n", puts_address());
     complain("main");
-    printf("%llu %u\n", lcg_next(argc), fnv1a(argv[0]));
+    printf("%llu %u %u %u\n", lcg_next(argc), fnv1a(argv[0]), crc32((const unsigned char *)argv[0], (unsigned)argc),
+           overwritten_half((unsigned)argc));
     return checked_divide(argc, argc);
 }
 """
@@ -214,6 +238,16 @@ def test_a_64_bit_constant_is_found_on_a_64_bit_target(flow, request):
         "A 32-bit target multiplies by a 64-bit constant a half at a time: 0xDEECE66D, and 5"
     ))
     flow.resolves(Function().uses_const(0x5DEECE66D), to="lcg_next")
+
+
+def test_a_constant_built_in_halves_scheduled_apart_is_found(flow):
+    """aarch64's -O2 builds CRC-32's polynomial in a MOVZ and a MOVK with other instructions between: IDA doesn't join those."""
+    flow.resolves(Function().uses_const(0xEDB88320), to="crc32")
+
+
+def test_halves_of_a_register_written_in_between_make_no_constant(flow):
+    """overwritten_half moves 0x1234 into a register, overwrites it, then sets its top half to 0x5678 (on ARM)."""
+    assert flow.resolve_all(Function().uses_const(0x56781234)) == []
 
 
 def test_a_negative_constant_is_found_as_the_unsigned_one_it_is(flow):

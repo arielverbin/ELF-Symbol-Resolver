@@ -47,8 +47,9 @@ class FakeBinary:
         self.references += [(address, target) for target in references]
         return self._add(address, FakeSymbol("GlobalVar", name or f"qword_{address:X}", 8))
 
-    def string(self, address: int, text: str) -> int:
-        return self._add(address, FakeSymbol("String", text, len(text) + 1))
+    def string(self, address: int, text: str, *, mistyped: bool = False) -> int:
+        """A string literal; `mistyped`, one IDA typed as data (as it may a short one, which looks like a pointer)."""
+        return self._add(address, FakeSymbol("MistypedString" if mistyped else "String", text, len(text) + 1))
 
     def to_json(self) -> str:
         return json.dumps({**asdict(self), "symbols": {str(address): asdict(symbol) for address, symbol in self.symbols.items()}})

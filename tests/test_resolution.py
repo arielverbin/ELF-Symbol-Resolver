@@ -218,5 +218,16 @@ def test_structure_needs_a_decompiler(resolution):
         resolution.resolve(Function().structured_with(loops=1))
 
 
+def test_a_string_ida_typed_as_data_is_no_variable():
+    """IDA may type a short literal as data ("OK\\0\\0" looks like a pointer): it stays a string, and isn't a global."""
+    binary = FakeBinary(image_base=0x400000)
+    status = binary.string(0x402010, "OK", mistyped=True)
+    binary.function(0x401100, references=[status])
+    fake_ida_modules.open(binary)
+    resolution = SymbolResolution()
+    assert resolution.resolve(GlobalVar().referenced_by(Function())).matches == frozenset()
+    assert resolution.resolve(String().referenced_by(Function())).matches == {status}
+
+
 def test_a_binary_without_rtti_has_no_vtables(resolution):
     assert resolution.resolve(VTable()).matches == frozenset()

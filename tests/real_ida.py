@@ -26,7 +26,7 @@ from typing import Iterable, Iterator
 import pytest
 from elfresolver import ELFResolver, ResolvedSymbol
 from elfresolver.exceptions import IDANotFoundError
-from elfresolver.resolver.ida_session import find_idat
+from elfresolver.resolver.ida_installation import IDAInstallation
 from elfresolver.symbols import Symbol
 
 ELFFile = pytest.importorskip("elftools.elf.elffile", reason="pyelftools isn't installed").ELFFile
@@ -34,7 +34,7 @@ ELFFile = pytest.importorskip("elftools.elf.elffile", reason="pyelftools isn't i
 
 def _ida_is_installed() -> bool:
     try:
-        find_idat()
+        IDAInstallation.find()
     except IDANotFoundError:
         return False
     return True

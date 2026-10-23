@@ -28,14 +28,16 @@ class FakeBinary:
     symbols: dict[int, FakeSymbol] = field(default_factory=dict)
     calls: list[tuple[int, int]] = field(default_factory=list)        # (caller, callee)
     references: list[tuple[int, int]] = field(default_factory=list)   # (source, target)
+    constants: list[tuple[int, int]] = field(default_factory=list)    # (function, an immediate operand of its)
     delay: float = 0.0          # seconds each lookup of cross-references takes, for a test to cancel in time
     broken: bool = False        # every lookup of cross-references raises inside "IDA"
     crash_on_start: int = 0     # the exit code "IDA" exits with before connecting back, if any
     impostor: bool = False      # something other than "IDA" connects back first, and doesn't know the launch's token
 
-    def function(self, address: int, *, calls: Iterable[int] = (), references: Iterable[int] = ()) -> int:
+    def function(self, address: int, *, calls: Iterable[int] = (), references: Iterable[int] = (), constants: Iterable[int] = ()) -> int:
         self.calls += [(address, callee) for callee in calls]
         self.references += [(address, target) for target in references]
+        self.constants += [(address, value) for value in constants]
         return self._add(address, FakeSymbol("Function", f"sub_{address:X}", 0x40))
 
     def plt_entry(self, address: int, name: str) -> int:
@@ -55,8 +57,8 @@ class FakeBinary:
     def from_json(cls, text: str) -> FakeBinary:
         fields = json.loads(text)
         symbols = {int(address): FakeSymbol(**symbol) for address, symbol in fields.pop("symbols").items()}
-        calls, references = (list(map(tuple, fields.pop(edges))) for edges in ("calls", "references"))
-        return cls(**fields, symbols=symbols, calls=calls, references=references)
+        calls, references, constants = (list(map(tuple, fields.pop(edges))) for edges in ("calls", "references", "constants"))
+        return cls(**fields, symbols=symbols, calls=calls, references=references, constants=constants)
 
     def _add(self, address: int, symbol: FakeSymbol) -> int:
         self.symbols[address] = symbol

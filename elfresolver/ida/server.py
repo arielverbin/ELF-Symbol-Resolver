@@ -1,16 +1,14 @@
 from __future__ import annotations
 import logging
 import traceback
-import time
-import ida_auto # type: ignore
+from contextlib import contextmanager
+from typing import Callable, Iterator, Mapping, Self
 import ida_loader # type: ignore
 import idc # type: ignore
-from contextlib import contextmanager
-from typing import Callable, Generator, Mapping, Self
-from elfresolver.protocol.connection import Connection
 from elfresolver.exceptions import ResolveInterrupted
+from elfresolver.ida.analysis import AutoAnalysis
 from elfresolver.ida.resolution import SymbolResolution
-from elfresolver.ida.symbols import IDAFunction
+from elfresolver.protocol.connection import Connection
 from elfresolver.protocol.messages import (
     CancelRequest, CancelResponse, FailureResponse, HelloResponse, IDALaunchEnv, IDAResponse, LogResponse,
     ReadyResponse, ResolveRequest, ResolveResponse, ShutdownRequest,
@@ -41,18 +39,18 @@ class Server:
             self._connection.send(HelloResponse(token=self._token))  # before any log record: the resolver expects it first
             with self._logs_piped():
                 try:
-                    self._wait_for_analysis()
+                    AutoAnalysis.complete()
                     self._connection.send(ReadyResponse(token=self._token))
-                    self._serve_main()
+                    self._serve()
                     if self._launch.save_database:
-                        self._save_database()
+                        ida_loader.save_database(idc.get_idb_path(), 0)  # for the resolver to cache, once IDA has exited
                 except Exception as error:
                     logger.debug("IDA's side failed", exc_info=True)
                     self._connection.send(self._failure(error))
                     return 1
         return 0
 
-    def _serve_main(self) -> None:
+    def _serve(self) -> None:
         """Answer every resolve, until a shutdown. A cancel arriving after its resolve has finished is ignored."""
         while not isinstance(request := self._connection.receive(), ShutdownRequest):
             if isinstance(request, ResolveRequest):
@@ -60,16 +58,15 @@ class Server:
                 self._connection.send(self._answer(request.symbol))
 
     def _answer(self, symbol: Symbol) -> IDAResponse:
+        """Every match of `symbol`, described; or why there is none: the resolver cancelled the resolve, or something raised."""
         try:
-            # parse requested symbol as an IDASymbol, and resolve it: its constraints recursively, each logged
-            resolvable = self._resolution.resolve(symbol)
+            resolvable = self._resolution.resolve(symbol)  # its constraints, recursively, each logged
         except ResolveInterrupted:
             logger.info("Cancelled resolving %r", symbol)
             return CancelResponse(token=self._token)
         except Exception as error:
             return self._failure(error)
-        addresses = resolvable.resolve()  # remembered
-        return ResolveResponse(tuple(resolvable.describe(address) for address in sorted(addresses)), token=self._token)
+        return ResolveResponse(tuple(map(resolvable.parse_from, sorted(resolvable.matches))), token=self._token)
 
     def _cancel_arrived(self) -> bool:
         """True if the resolver has asked to stop the request under way (the only message it sends meanwhile)."""
@@ -77,32 +74,11 @@ class Server:
         return isinstance(request, CancelRequest) and request.token == self._token
 
     def _failure(self, error: Exception) -> FailureResponse:
-        return FailureResponse(
-            type(error).__name__,
-            str(error), "".join(traceback.format_exception(error)),
-            token=self._token
-        )
-
-    def _wait_for_analysis(self) -> None:
-        """
-        Return once IDA's auto-analysis of the open database has finished: with a function
-        wherever a pointer leads to one, and each function one of its own.
-        """
-        logger.info("Waiting for IDA's auto-analysis")
-        started = time.monotonic()
-        ida_auto.auto_wait()
-        IDAFunction.make_functions_of_thumb_pointers()
-        ida_auto.auto_wait()  # for the code those call
-        IDAFunction.separate_tail_called_functions()
-        ida_auto.auto_wait()  # for the functions that made
-        logger.info("Auto-analysis finished in %.1fs", time.monotonic() - started)
-
-    def _save_database(self) -> None:
-        """Write the database to its file, for the resolver to cache once IDA has exited."""
-        ida_loader.save_database(idc.get_idb_path(), 0)
+        """The response telling the resolver `error` was raised: its class's name, message, and traceback."""
+        return FailureResponse(type(error).__name__, str(error), "".join(traceback.format_exception(error)), token=self._token)
 
     @contextmanager
-    def _logs_piped(self) -> Generator[None]:
+    def _logs_piped(self) -> Iterator[None]:
         """For the block, every elfresolver record from the launch's log level up is sent to the resolver too,
         as part of the answer to the request under way."""
         package_logger = logging.getLogger("elfresolver")
@@ -114,8 +90,6 @@ class Server:
         finally:
             package_logger.removeHandler(handler)
 
-
-# Log handling: pipe logs to session
 
 class ConnectionLogHandler(logging.Handler):
     """Sends every record it handles over a connection, for the resolver to log again,

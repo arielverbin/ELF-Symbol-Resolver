@@ -13,7 +13,8 @@ as IDA would show an ELF:
     extern   an import for each PLT stub, where IDA puts them
 
 Each symbol is one item, so one head: a function's calls and references all go
-from its entry.
+from its entry, which holds its constants as one instruction's immediates.
+There is no decompiler.
 """
 from __future__ import annotations
 import inspect
@@ -28,7 +29,7 @@ _EXTERN = 0x7F000000  # where the imports go: far from any address a test picks
 _SEGMENTS = {"Function": ".text", "PLTEntry": ".plt", "String": ".rodata", "GlobalVar": ".data"}
 
 # An item's flags, as get_flags() gives them (for the is_* and has_* functions to read).
-_CODE, _DATA, _STRLIT, _VALUE, _XREF = 1, 2, 4, 8, 16
+_CODE, _DATA, _STRLIT, _VALUE, _XREF, _IMMD = 1, 2, 4, 8, 16, 32
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,17 @@ class Xref:
     type: int
 
 
+class CtreeVisitor:
+    """ida_hexrays' visitor of a decompiled function's statements, for elfresolver to subclass: no fake decompiles."""
+
+    def __init__(self, flags: int) -> None:
+        self.flags = flags
+
+
+class DecompilationFailure(Exception):
+    """ida_hexrays' error, when it can't decompile a function."""
+
+
 @dataclass(frozen=True)
 class _Item:
     start: int
@@ -74,6 +86,7 @@ class FakeIDA:
     binary: FakeBinary
     idb_path: Path | None = None
     xrefs_to_asked: list[int] = field(default_factory=list)  # every address XrefsTo() was asked about, in order
+    names_asked: list[int] = field(default_factory=list)     # every address get_name() was asked about, in order
 
     BADADDR = 0xFFFFFFFFFFFFFFFF
     SEG_XTRN, SEG_CODE, SEG_DATA = 1, 2, 3
@@ -81,6 +94,12 @@ class FakeIDA:
     fl_CF, fl_CN, fl_JF, fl_JN, fl_F = 16, 17, 18, 19, 21
     dr_O = 1
     segment_t = Segment
+    FF_REF = _XREF
+    OPND_ALL = 15
+    ctree_visitor_t = CtreeVisitor
+    DecompilationFailure = DecompilationFailure
+    CV_FAST = 0
+    cit_if, cit_for, cit_while, cit_do, cit_switch = 72, 73, 74, 75, 76
 
     def __post_init__(self) -> None:
         self._items: dict[int, _Item] = {}
@@ -95,6 +114,8 @@ class FakeIDA:
                 self._add(_Item(address, symbol.size, _DATA | _STRLIT | _VALUE, "", segment))
             else:
                 flags = _CODE | _VALUE if symbol.kind == "Function" else _DATA | _VALUE
+                if any(function == address for function, _ in self.binary.constants):
+                    flags |= _IMMD
                 self._add(_Item(address, symbol.size, flags, symbol.name or "", segment))
         self._xrefs = [Xref(caller, callee, self.fl_CN) for caller, callee in self.binary.calls]
         self._xrefs += [Xref(source, target, self.dr_O) for source, target in self.binary.references]
@@ -148,6 +169,9 @@ class FakeIDA:
         referred = any(xref.to == ea for xref in self._xrefs)
         return (item.flags & ~_VALUE if item is not None else 0) | (_XREF if referred else 0)  # as IDA 9's: no byte value
 
+    def is_code(self, flags: int) -> bool:
+        return bool(flags & _CODE)
+
     def is_data(self, flags: int) -> bool:
         return bool(flags & _DATA)
 
@@ -159,6 +183,9 @@ class FakeIDA:
 
     def has_xref(self, flags: int) -> bool:
         return bool(flags & _XREF)
+
+    def has_immd(self, flags: int) -> bool:
+        return bool(flags & _IMMD)
 
     def get_item_head(self, ea: int) -> int:
         item = self._item_at(ea)
@@ -183,6 +210,25 @@ class FakeIDA:
         offset = ea - segment.start_ea
         return bytes(self._bytes[segment.name][offset:offset + size])
 
+    def get_qword(self, ea: int) -> int:
+        return int.from_bytes(self.get_bytes(ea, 8) or bytes(8), "little")
+
+    def get_dword(self, ea: int) -> int:
+        return int.from_bytes(self.get_bytes(ea, 4) or bytes(4), "little")
+
+    # ida_ua
+
+    def get_immvals(self, ea: int, operand: int, flags: int) -> list[int]:
+        return [value for function, value in self.binary.constants if function == ea]
+
+    # ida_hexrays
+
+    def init_hexrays_plugin(self) -> bool:
+        return False
+
+    def decompile(self, ea: int) -> None:
+        raise DecompilationFailure("No fake decompiles")
+
     # ida_funcs
 
     def get_func(self, ea: int) -> Func | None:
@@ -204,6 +250,7 @@ class FakeIDA:
     # ida_name
 
     def get_name(self, ea: int) -> str:
+        self.names_asked.append(ea)
         item = self._items.get(ea)
         return item.name if item is not None else ""
 
@@ -273,8 +320,12 @@ class FakeIDA:
 _MODULES = {
     "ida_auto": ["auto_wait"],
     "ida_bytes": [
-        "get_flags", "is_data", "is_unknown", "is_strlit", "has_xref",
-        "get_item_head", "get_item_end", "get_item_size", "is_loaded", "get_bytes",
+        "get_flags", "is_code", "is_data", "is_unknown", "is_strlit", "has_xref", "has_immd", "FF_REF", "OPND_ALL",
+        "get_item_head", "get_item_end", "get_item_size", "is_loaded", "get_bytes", "get_qword", "get_dword",
+    ],
+    "ida_hexrays": [
+        "init_hexrays_plugin", "decompile", "ctree_visitor_t", "DecompilationFailure",
+        "CV_FAST", "cit_if", "cit_for", "cit_while", "cit_do", "cit_switch",
     ],
     "ida_funcs": ["get_func", "get_func_name", "calc_func_size", "calc_thunk_func_target", "FUNC_THUNK"],
     "ida_ida": ["inf_get_procname", "inf_is_64bit"],
@@ -283,6 +334,7 @@ _MODULES = {
     "ida_nalt": ["get_imagebase"],
     "ida_name": ["get_name", "demangle_name"],
     "ida_pro": ["qexit"],
+    "ida_ua": ["get_immvals"],
     "ida_segment": ["getseg", "get_segm_name", "get_segm_qty", "getnseg", "segment_t", "SEG_CODE", "SEG_DATA", "SEG_XTRN"],
     "ida_xref": ["fl_CF", "fl_CN", "fl_JF", "fl_JN", "fl_F", "dr_O"],
     "idautils": ["Functions", "Chunks", "Heads", "Names", "XrefsFrom", "XrefsTo", "DataRefsFrom", "DataRefsTo"],

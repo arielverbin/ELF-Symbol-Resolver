@@ -5,7 +5,7 @@ token of its own; nothing but a Serializable is built from what arrives.
 """
 import pytest
 from elfresolver import ResolvedSymbol
-from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, VTable
 from elfresolver.protocol.messages import (
     CancelRequest, CancelResponse, FailureResponse, HelloResponse, IDALaunchEnv, LogResponse, Message,
     ReadyResponse, ResolveRequest, ResolveResponse, ShutdownRequest,
@@ -20,6 +20,8 @@ TOKEN = "0123abcd"
 @pytest.mark.parametrize("message", [
     IDALaunchEnv(port=50123, log_level=10, save_database=True),
     ResolveRequest(SYMBOL),
+    ResolveRequest(Function().calls(Function(), max_depth=None).uses_const(-1).structured_with(loops=1, switch_cases=(6, None))),
+    ResolveRequest(VTable("net::Handler").references(Function())),
     CancelRequest(token=TOKEN),
     ShutdownRequest(),
     HelloResponse(token=TOKEN),
@@ -34,14 +36,14 @@ def test_a_message_comes_back_as_it_was_sent(message):
 
 
 def test_a_symbol_comes_back_hashable_and_equal():
-    resolve = Message.from_serialized(ResolveRequest(SYMBOL).serialize())
+    resolve = ResolveRequest.from_serialized(ResolveRequest(SYMBOL).serialize())
     assert resolve.symbol == SYMBOL
     assert hash(resolve.symbol) == hash(SYMBOL)
 
 
 def test_a_symbol_comes_back_with_its_id():
     """So IDA's logs name a symbol, and every symbol in it, as the resolver's side does."""
-    resolve = Message.from_serialized(ResolveRequest(SYMBOL).serialize())
+    resolve = ResolveRequest.from_serialized(ResolveRequest(SYMBOL).serialize())
     assert repr(resolve.symbol) == repr(SYMBOL)
 
 

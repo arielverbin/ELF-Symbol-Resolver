@@ -9,7 +9,8 @@ found each symbol, as constraints that hold in every build, and finds it again i
 one with a headless IDA:
 
 ```python
-from elfresolver import ELFResolver, Function, GlobalVar, PLTEntry, String
+from elfresolver import ELFResolver
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 
 reader = Function().calls(PLTEntry("recvfrom")).references(String("enter input"))
 parser = Function().called_by(reader)
@@ -49,6 +50,7 @@ nest them.
 | `PLTEntry`  | an imported function's PLT stub, named by the import's demangled name (a `Function` too) |
 | `GlobalVar` | a data item where variables live (`.data`, `.bss`, `.rodata`, ...), other than a string: as IDA typed it (see below) |
 | `String`    | a NUL-terminated string literal, named by its text                               |
+| `VTable`    | a C++ class's virtual table (Itanium ABI), found through its RTTI, named by its class (`VTable("net::Handler")`) |
 
 | Constraint                | On          | Holds when the symbol...                                            |
 |---------------------------|-------------|---------------------------------------------------------------------|
@@ -56,8 +58,10 @@ nest them.
 | `.matching(regex)`        | every kind  | has a name (a string: its text) the regex finds a match in          |
 | `.references(symbol)`     | every kind  | refers to `symbol`'s address: code taking it, data holding a pointer to it |
 | `.referenced_by(symbol)`  | every kind  | has its address referred to by `symbol`                             |
-| `.calls(function)`        | `Function`  | calls `function`: directly, by a tail jump, or through a thunk      |
-| `.called_by(function)`    | `Function`  | is called by `function`                                             |
+| `.calls(function, max_depth=1)` | `Function` | calls `function`: directly, by a tail jump, or through a thunk; with a `max_depth` above 1 (None: any), through functions calling it too |
+| `.called_by(function, max_depth=1)` | `Function` | is called by `function`; with a `max_depth` above 1 (None: any), by the functions it calls too |
+| `.uses_const(value)`      | `Function`  | uses the integer `value`: as an instruction's immediate or displacement (of any width it fits: `-1` is `0xFFFFFFFF` in 32 bits), or from a literal pool |
+| `.structured_with(loops=, ifs=, switch_cases=)` | `Function` | has these in its decompiled code (Hex-Rays'): each a count, or `(at least, at most)` with `None` for unbounded |
 
 `resolve(symbol)` returns its one match, a `ResolvedSymbol` with an `address` (as linked), an
 `offset` (from the image base: add it to where the binary is loaded), a `name` and a `size`.
@@ -65,19 +69,20 @@ nest them.
 `SymbolNotFoundError`; when it matches several things, `AmbiguousSymbolError`, with every match:
 
 ```
-SymbolNotFoundError: Nothing matches Function(0x10bc4f190).calls(0x10bc4e3d0).references(0x10ad1c310)
+SymbolNotFoundError: Nothing matches Function(0x10bc4f190).calls(callee=0x10bc4e3d0).references(target=0x10ad1c310)
 ```
 
-A symbol's repr goes one level deep, naming each symbol in it by its id (`hex(id(symbol))`).
-IDA's side logs each symbol it resolves under the same id as the recursion reaches it, so the
-log shows which nested symbol matched nothing:
+A symbol's repr goes one level deep, naming each symbol in it by its id (`hex(id(symbol))`), and
+leaving out arguments at their default. IDA's side logs each symbol it resolves under the same id
+as the recursion reaches it, so the log shows which nested symbol matched nothing (and, at debug
+level, what each constraint left). Once nothing is left, the constraints after aren't met at all:
+here, the string isn't resolved.
 
 ```
-elfresolver.ida.resolution: Resolving Function(0x10bc4f190).calls(0x10bc4e3d0).references(0x10ad1c310)
-elfresolver.ida.resolution: Resolving PLTEntry(0x10bc4e3d0).matching('\\Asendto\\Z')
-elfresolver.ida.resolution: PLTEntry(0x10bc4e3d0).matching('\\Asendto\\Z'): 0 match(es)
-elfresolver.ida.resolution: String(0x10ad1c310).matching('\\Aenter\\ input\\Z'): 1 match(es), resolved before
-elfresolver.ida.resolution: Function(0x10bc4f190).calls(0x10bc4e3d0).references(0x10ad1c310): 0 match(es)
+elfresolver.ida.resolution: Resolving Function(0x10bc4f190).calls(callee=0x10bc4e3d0).references(target=0x10ad1c310)
+elfresolver.ida.resolution: Resolving PLTEntry(0x10bc4e3d0).matching(pattern='\\Asendto\\Z')
+elfresolver.ida.resolution: PLTEntry(0x10bc4e3d0).matching(pattern='\\Asendto\\Z'): 0 match(es)
+elfresolver.ida.resolution: Function(0x10bc4f190).calls(callee=0x10bc4e3d0).references(target=0x10ad1c310): 0 match(es)
 ```
 
 ### Writing symbols that last
@@ -120,6 +125,21 @@ uses it: a struct whose fields are read may be one item per field, and an array 
 the slot holding the handler's pointer, inside the table; `resolve_all()` gets every item a
 function reads.
 
+A `VTable` is a class's whole vtable, as `nm -S` sizes it: its primary table (vcall and vbase
+offsets, offset to top, typeinfo, then the virtual functions' pointers), and a secondary table
+for each base past the first. It is found through the class's RTTI (a typeinfo name, pointed at
+by a typeinfo, pointed at by the table), or by a `_ZTV` symbol (as a shared object exports, and
+IDA names those whose RTTI it parsed). Every vtable libstdc++ exports is found this way, each at
+its symbol's address, with its symbol's size. So `Function().referenced_by(VTable("geo::Polygon"))` finds all of
+its virtual functions, `VTable().references(method)` the tables holding `method`, and
+`Function().references(VTable("net::EchoHandler"))` the code making or unmaking its objects.
+
+Constraints that check candidates one by one (`.matching()`, `.uses_const()`,
+`.structured_with()`) run after the others, cheapest first, on what those left: write the cheap
+anchors (an import, a string, a call), and decompiling is only for the few functions they leave.
+`.structured_with()` counts change with optimization (loops unrolled, switches turned into
+tables or chains of compares, ifs made branchless): bounds outlast exact counts.
+
 ### Known limitations
 
 - **Thread-locals** aren't found: code reaches one through the thread pointer and its offset in
@@ -131,6 +151,13 @@ function reads.
   table's. ARM's tables, vtables and typeinfo get this; x86's tables are usually one item.
 - **Biased pointers**: a loop counting from 1 may refer to its array minus one element, which
   is what `GlobalVar().referenced_by(loop)` finds.
+- **Constants**: a 32-bit target uses a 64-bit constant a half at a time (`0x5DEECE66D` is
+  `0xDEECE66D` and `5`), and a division by a constant is a multiplication by another.
+- **Decompiled structure** needs IDA's Hex-Rays decompiler for the binary's processor:
+  without it, `.structured_with()` raises an `IDAError` saying so.
+- **VTables** need RTTI or a `_ZTV` symbol (`-fno-rtti` and stripped finds none). Without a
+  symbol, a table with virtual bases starts at its offset to top (past its vcall and vbase
+  offsets), and a construction vtable of base `B` isn't told apart from `B`'s own.
 
 ---
 
@@ -141,27 +168,43 @@ function reads.
  ┌───────────────────────────┐  loopback TCP   ┌────────────────────────────────┐
  │ elfresolver.resolver      │◀── JSON frames ─▶│ elfresolver.ida                │
  │   ELFResolver             │                  │   bootstrap → server           │
- │   IDASession              │                  │     → resolution → symbols/    │
+ │   IDASession              │                  │     → analysis                 │
+ │   IDAInstallation         │                  │     → resolution → symbols/    │
  │   DatabaseCache           │                  │                                │
  └─────────────┬─────────────┘                  └───────────────┬────────────────┘
                └──────▶ symbols · constraints · protocol ◀──────┘
 ```
 
-`ELFResolver` starts `idat` headless on the binary with `elfresolver/ida/bootstrap.py`, which
-puts the resolver's own copy of elfresolver on IDA's `sys.path`. Then the conversation goes:
+`ELFResolver` finds IDA (`IDAInstallation`) and starts `idat` headless on the binary with
+`elfresolver/ida/bootstrap.py`, which puts the resolver's own copy of elfresolver on IDA's
+`sys.path`. Then the conversation (`IDASession`) goes:
 
 1. The resolver listens on a free loopback port (TCP works the same on Windows), and passes IDA
    the launch through its environment: the port to connect back to, and a token.
 2. IDA connects back and says Hello, echoing the token, which only the IDA the resolver started
    knows. If the first connection doesn't, starting fails.
-3. IDA says Ready once its auto-analysis is done.
+3. IDA says Ready once its auto-analysis is done, and completed where it falls short
+   (`AutoAnalysis`: Thumb code only a pointer leads to, functions folded into their callers).
 4. IDA answers each symbol it's sent. Every request carries a token of its own, which its answer echoes.
 5. On leaving the `with` block, the resolver asks IDA to shut down.
 
 Inside IDA, each constraint allows a set of addresses, and a symbol's matches are the
 addresses all of them allow. A constraint relating to another symbol is followed back from that
 symbol's matches (usually one import or one string), so nothing is scanned for nothing.
-Every symbol is resolved once per session: met again, alone or nested, it is answered from memory.
+`SymbolResolution` meets the constraints that find their matches at once first, in the order
+written, then those checking candidates one by one, lowest cost first: each is handed what the
+constraints before it left (every symbol of the kind, if none came before), and once nothing is
+left, the rest are skipped. Every symbol is resolved once per session: met again, alone or
+nested, it is answered from memory.
+
+A new constraint is three pieces: a dataclass in `elfresolver/constraints.py`, the `Symbol`
+method adding it, and a class method on its kind inside IDA, marked with the constraint it
+meets: `@SymbolResolution.constraint("calls")` for one returning every match at once, or
+`@SymbolResolution.constraint("uses_const", cost=2)` for one checking a single candidate. Each
+constraint has one method meeting it, called with the kind being resolved as `cls`: a kind
+specializes it through the class methods it calls (`names_of`, `filter_from`, `references_to`). A
+new kind is a `Symbol` class, and an `IDASymbol` class registering itself for it
+(`class IDAVTable(IDASymbol, kind=VTable)`) in `elfresolver/ida/symbols/`.
 
 Everything IDA's side logs is logged again on your side, under the same logger names. An
 exception inside IDA is raised as an `IDAError`, with IDA's traceback attached as a note.
@@ -175,6 +218,26 @@ SHA-256 of its content, under `$ELFRESOLVER_CACHE` (by default, the platform's c
 Only the first run on a binary waits for auto-analysis. Entries are never opened in place:
 IDA works on a copy, so neither concurrent resolvers nor a crashed IDA can corrupt one. A
 database is stored only after its IDA exited cleanly.
+
+---
+
+## Performance
+
+IDA's auto-analysis is the slow part, and it happens once per binary: the database is cached.
+Measured with IDA 9.2 on Ubuntu's aarch64 builds of each binary:
+
+| Query                                         | dash (0.2 MB) | libstdc++ (2.7 MB) | gdb (12 MB) |
+|-----------------------------------------------|---------------|--------------------|-------------|
+| First analysis, then opening the cached database | 1.8s, 0.5s | 12s, 0.7s          | 95s, 1.3s   |
+| Every string; every global                    | 0.01s; 0.02s  | 0.13s; 0.14s       | 1.4s; 1.3s  |
+| Every vtable (once the strings are read)      | 0s            | 0.03s              | 0.07s       |
+| The callers of `malloc`; at any depth         | 0s; 0.01s     | 0s; 0.16s          | 0.01s; 0.7s |
+| A constant, in every function                 | 0.03s         | 0.5s               | 3.0s        |
+| Decompiling a function (`.structured_with()`) |               |                    | 0.5s each   |
+
+A constraint relating to an anchor (an import, a string) takes milliseconds, whatever the
+binary's size. One checking candidates costs per candidate, so give it anchors: `.structured_with()` on
+the 360 functions calling `malloc` in gdb takes 3 minutes, on a handful a few seconds.
 
 ---
 
@@ -197,10 +260,10 @@ symbols resolve to the addresses in the unstripped build's symbol table (`nm -C`
 
 | Module                         | Program                                                                 |
 |--------------------------------|-------------------------------------------------------------------------|
-| `test_ida.py`                  | a C++ server: exceptions, virtual functions, thunks, lambdas, templates, statics |
-| `test_ida_cpp_library.py`      | a C++ shared object: exported names, overloads, operators, calls through its own PLT |
-| `test_ida_c.py`                | the server above in C, and C control flow: tail calls, cold paths, inlining, merged literals |
-| `test_ida_c_data.py`           | C data: tables of functions and strings, structs, lists, switch tables  |
+| `test_ida.py`                  | a C++ server: exceptions, virtual functions and vtables, thunks, lambdas, templates, statics |
+| `test_ida_cpp_library.py`      | a C++ shared object: exported names, overloads, operators, vtables, calls through its own PLT |
+| `test_ida_c.py`                | the server above in C, and C control flow: tail calls, cold paths, inlining, merged literals, constants, call depth |
+| `test_ida_c_data.py`           | C data: tables of functions and strings, structs, lists, switch tables, decompiled structure |
 
 A known limitation is marked as an expected failure where it applies, so a fix shows as XPASS.
 A build whose compiler isn't installed is skipped. The compilers are looked up by target triplet
@@ -216,11 +279,10 @@ On macOS, wrappers on `PATH` named the same, running a Linux VM's compilers, wor
 
 ## Next
 
-- **VTables** (Itanium C++ ABI): `VTable("net::Connection")`, found through its typeinfo name,
-  and `.slot(n)` to get a virtual function as a `Function`.
-- **Control flow**: `.with_loops()`, `.with_switch(cases=5)`, basic-block counts.
-- **More constraints**: `.uses_constant(0xDEADBEEF)`, constant call arguments, call order,
-  transitive calls (`.reaches(x, depth=3)`), callbacks (`.passed_to(PLTEntry("pthread_create"), arg=2)`),
-  reads and writes of a global, `Export("name")`, negation and alternatives.
+- **VTables**: `.slot(n)`, to get a virtual function as a `Function`.
+- **Control flow**: basic-block counts, and more of the decompiled code's shape (calls, returns, gotos).
+- **More constraints**: constant call arguments, call order, callbacks
+  (`.passed_to(PLTEntry("pthread_create"), arg=2)`), reads and writes of a global,
+  `Export("name")`, negation and alternatives.
 - **Infrastructure**: a result cache that skips IDA altogether for builds seen before, an idalib
   backend, a pool of IDAs for many builds, and a CLI emitting offsets as JSON or a C header.

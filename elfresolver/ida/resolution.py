@@ -1,43 +1,115 @@
 from __future__ import annotations
+import functools
 import logging
-from typing import Callable, Mapping
-from elfresolver.ida.symbols import IDAFunction, IDAGlobalVar, IDAPLTEntry, IDAString, IDASymbol
-from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, Symbol
-
-_KINDS: Mapping[type[Symbol], type[IDASymbol]] = {
-    Function: IDAFunction,
-    PLTEntry: IDAPLTEntry,
-    GlobalVar: IDAGlobalVar,
-    String: IDAString,
-}
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Iterable, Iterator, TypeVar
+from elfresolver.constraints import IDAConstraint
+from elfresolver.exceptions import ResolveInterrupted
+from elfresolver.symbols import Symbol
+if TYPE_CHECKING:
+    from elfresolver.ida.symbols import IDASymbol
 
 logger = logging.getLogger(__name__)
 
+_Function = TypeVar("_Function", bound=Callable[..., Any])
+
+
+@dataclass(frozen=True)
+class _ConstraintMethod:
+    """The class method meeting a constraint (see SymbolResolution.constraint): its function, and its cost."""
+    function: Callable[..., Any]
+    cost: int
+
 
 class SymbolResolution:
-    """Every symbol met in one database: an IDASymbol of its kind, built once, so it resolves once."""
+    """
+    Resolves symbols in the database IDA has open: each constraint met by the method registered
+    for it (see constraint), each symbol equal to another resolved once.
+    """
+
+    _constraint_methods: ClassVar[dict[str, _ConstraintMethod]] = {}  # by IDAConstraint.method: the one method meeting each
 
     def __init__(self, interrupted: Callable[[], bool] = lambda: False) -> None:
-        """`interrupted` is asked before every constraint is met: True stops the resolve under way."""
+        """`interrupted` is asked before each constraint is met, and before each candidate is checked:
+        True stops the resolve under way."""
         self.interrupted = interrupted
-        self._symbols: dict[Symbol, IDASymbol] = {}  # cache resolved symbols
+        self._resolved: dict[Symbol, IDASymbol] = {}
+
+    @classmethod
+    def constraint(cls, method: str, cost: int = 0) -> Callable[[_Function], _Function]:
+        """
+        Registers a class method implementing the constraint named `method`
+        (i.e. IDAConstraint.method: "calls"), specifying a cost: constrains are evaluated sorted by cost,
+        to let heavy constraints run on a reduced set of candidates, for optimization.
+        Cost 0: it takes the constraint's fields and returns every symbol of the kind meeting it.
+        Above 0: it takes one candidate, then the fields, and returns True if the candidate meets it.
+        """
+        def register(function: _Function) -> _Function:
+            if (registered := cls._constraint_methods.get(method)) is not None:
+                raise TypeError(f".{method}() is already met by {registered.function.__qualname__}")
+            cls._constraint_methods[method] = _ConstraintMethod(function, cost)
+            return function
+        return register
 
     def resolve(self, symbol: Symbol) -> IDASymbol:
-        """Resolves the IDASymbol of `symbol` (main logic entry.)"""
-        resolvable = self.as_resolvable(symbol)
-        if resolvable.resolved:
-            logger.info("%r: %d match(es), resolved before", symbol, len(resolvable.resolve()))
-        else:
-            logger.info("Resolving %r", symbol)
-            matches = resolvable.resolve()
-            logger.info("%r: %d match(es)", symbol, len(matches))
-        return resolvable
+        """`symbol`, resolved (see _apply_constraints): once for every symbol equal to it, which is answered from memory."""
+        if (resolved := self._resolved.get(symbol)) is not None:
+            logger.info("%r: %d match(es), resolved before", symbol, len(resolved.matches))
+            return resolved
 
-    def as_resolvable(self, symbol: Symbol) -> IDASymbol:
-        """The IDASymbol of `symbol`: the same one for every symbol equal to it."""
-        if symbol not in self._symbols:
-            self._symbols[symbol] = _KINDS[type(symbol)](symbol, self)
-        else:
-            logger.debug(f"symbol {symbol!r} already constructed")
+        logger.info("Resolving %r", symbol)
+        kind = self._kind_of(symbol)
+        matches = self._apply_constraints(kind, symbol)
+        resolved = self._resolved[symbol] = kind(symbol, matches)
+        logger.info("%r: %d match(es)", symbol, len(resolved.matches))
+        return resolved
 
-        return self._symbols[symbol]
+    def _apply_constraints(self, kind: type[IDASymbol], symbol: Symbol) -> frozenset[int]:
+        """
+        The address of every symbol of `kind` meeting `symbol`'s constraints: those of cost 0 met first,
+        in the order written, then the others, lowest cost first; each on what the ones before
+        left. Once nothing is, the rest are skipped, and the symbols in them never resolved.
+        """
+        matches: frozenset[int] | None = None  # every symbol of the kind, until a constraint is met
+        for constraint in sorted(symbol.constraints, key=lambda constraint: self._constraint_methods[constraint.method].cost):
+            if matches is not None and not matches:
+                break
+            matches = self._meet(kind, constraint, matches)
+            logger.debug("%r: %s leaves %d candidate(s)", symbol, constraint, len(matches))
+        return matches if matches is not None else frozenset(kind.all())
+
+    def _meet(self, kind: type[IDASymbol], constraint: IDAConstraint, candidates: frozenset[int] | None) -> frozenset[int]:
+        """What `constraint` leaves of `candidates` (None: every symbol of `kind`), once the symbols in it resolve."""
+        method = self._constraint_methods[constraint.method]
+        meet = functools.partial(method.function, kind)  # the class method, bound to the kind being resolved
+        fields = [
+            # recursively solve the constraint's dependencies
+            self.resolve(value) if isinstance(value, Symbol) else value
+            for value in vars(constraint).values()
+        ]
+        self._stop_if_cancelled()  # IDA's side runs on one thread: nothing else would notice a cancel
+        if method.cost == 0:
+            found = frozenset(meet(*fields))
+            return found if candidates is None else candidates & found
+        # for heavy constraints, iterate over the candidates and feed `meet` with every one
+        return frozenset(self._checked(meet, fields, kind.all() if candidates is None else candidates))
+
+    def _checked(self, check: Callable[..., bool], fields: list[Any], candidates: Iterable[int]) -> Iterator[int]:
+        """The candidates `check` passes, given `fields`: one by one, noticing a cancel before each."""
+        for candidate in candidates:
+            # assuming `check` is heavy, we need to call `_stop_if_cancelled` for every candidate
+            self._stop_if_cancelled()
+            if check(candidate, *fields):
+                yield candidate
+
+    def _stop_if_cancelled(self) -> None:
+        """Raise ResolveInterrupted if the resolver has cancelled the resolve under way (see `interrupted`)."""
+        if self.interrupted():
+            raise ResolveInterrupted("The resolver cancelled the resolve")
+
+    @staticmethod
+    def _kind_of(symbol: Symbol) -> type[IDASymbol]:
+        """The IDASymbol class resolving `symbol`'s kind (see IDASymbol.kinds)."""
+        # imported here, as it imports every kind, which imports this module (for constraint) and registers its methods
+        from elfresolver.ida.symbols import IDASymbol
+        return IDASymbol.kinds[type(symbol)]

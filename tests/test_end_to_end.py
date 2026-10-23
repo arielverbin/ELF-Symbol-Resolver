@@ -18,7 +18,8 @@ from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
 from elfresolver.exceptions import AmbiguousSymbolError, IDAError, IDAStartupError, SymbolNotFoundError
 from fakes import example_binary
 
-READER = Function().calls(PLTEntry("recvfrom")).references(String("enter input"))
+RECVFROM = PLTEntry("recvfrom")
+READER = Function().calls(RECVFROM).references(String("enter input"))
 PARSER = Function().called_by(READER)
 
 
@@ -57,8 +58,8 @@ def test_records_logged_inside_ida_are_logged_again(fake_ida, cache, write_binar
     caplog.set_level(logging.INFO, logger="elfresolver")
     with ELFResolver(write_binary(example_binary()), ida_dir=fake_ida, cache=cache) as resolver:
         resolver.resolve(READER)
-    recvfrom = READER.constraints[0].callee  # nested in it: its resolve is logged too, under the id it has here
-    assert ("elfresolver.ida.resolution", logging.INFO, f"Resolving {recvfrom!r}") in caplog.record_tuples
+    # RECVFROM is nested in it: its resolve is logged too, under the id it has here
+    assert ("elfresolver.ida.resolution", logging.INFO, f"Resolving {RECVFROM!r}") in caplog.record_tuples
     assert ("elfresolver.ida.resolution", logging.INFO, f"{READER!r}: 1 match(es)") in caplog.record_tuples
 
 

@@ -6,7 +6,7 @@ mangled or demangled, as GNU's tools show it (nm -C, c++filt).
 """
 import pytest
 from elfresolver.exceptions import AmbiguousSymbolError
-from elfresolver.symbols import Function, GlobalVar, PLTEntry, String
+from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, VTable
 from real_ida import REAL_IDA, SHARED_OBJECTS, Program, limitation, module_fixture
 
 pytestmark = REAL_IDA
@@ -287,8 +287,19 @@ def test_a_typeinfo_is_found_by_its_name_and_by_its_class_name(library):
 def test_the_virtual_functions_in_a_vtable_are_found_through_it(library, request):
     limitation(request, reason=(
         "IDA types a vtable one pointer to an item, even with its symbol's size known: the vtable "
-        "is its first slot (the offset to the object's top), which holds no pointer"
+        "is its first slot (the offset to the object's top), which holds no pointer. A VTable is the "
+        "whole table: see test_the_virtual_functions_of_a_vtable_kind_are_found_through_it"
     ))
     found = {name for match in library.resolve_all(Function().referenced_by(GlobalVar("vtable for geo::Polygon")))
              for name in library.symbols.at(match.address)}
     assert {"geo::Polygon::area() const", "geo::Polygon::kind() const"} <= found
+
+
+def test_an_exported_vtable_is_found_by_its_class_name(library):
+    library.resolves(VTable("geo::Polygon"), to="vtable for geo::Polygon")
+    library.resolves(VTable("_ZTVN3geo5ShapeE"), to="vtable for geo::Shape")
+
+
+def test_the_virtual_functions_of_a_vtable_kind_are_found_through_it(library):
+    found = {name for match in library.resolve_all(Function().referenced_by(VTable("geo::Polygon"))) for name in library.symbols.at(match.address)}
+    assert {"geo::Polygon::area() const", "geo::Polygon::kind() const"} <= found, found

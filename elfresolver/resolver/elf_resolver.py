@@ -8,7 +8,8 @@ from typing import Self
 from elfresolver.exceptions import AmbiguousSymbolError, SymbolNotFoundError
 from elfresolver.protocol.messages import ResolvedSymbol
 from elfresolver.resolver.database_cache import DatabaseCache
-from elfresolver.resolver.ida_session import IDASession, find_idat
+from elfresolver.resolver.ida_installation import IDAInstallation
+from elfresolver.resolver.ida_session import IDASession
 from elfresolver.symbols import Symbol
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class ELFResolver:
         self._binary = Path(binary)
         if not self._binary.is_file():
             raise FileNotFoundError(f"No binary at {self._binary}")
-        self._idat = find_idat(ida_dir)
+        self._ida = IDAInstallation.find(ida_dir)
         self._cache = cache if cache is not None else DatabaseCache()
         self._startup_timeout = startup_timeout
         # Inside the `with` block: the IDA resolving, and the directory of its files.
@@ -53,7 +54,7 @@ class ELFResolver:
 
     def __exit__(self, *exc_info: object) -> None:
         try:
-            exit_code = self._session.close()
+            exit_code = self._open_session.close()
             logger.info("IDA exited with exit code of %d", exit_code)
             if self._analyzed_afresh and exit_code == 0:
                 self._cache.store(self._binary, self._database)
@@ -74,9 +75,14 @@ class ELFResolver:
 
     def resolve_all(self, symbol: Symbol) -> list[ResolvedSymbol]:
         """Every match of `symbol`, by address."""
+        return list(self._open_session.resolve(symbol))
+
+    @property
+    def _open_session(self) -> IDASession:
+        """The IDA session of the `with` block under way."""
         if self._session is None:
             raise RuntimeError("An ELFResolver resolves inside its `with` block only")
-        return list(self._session.resolve(symbol))
+        return self._session
 
     @property
     def _database(self) -> Path:
@@ -90,6 +96,6 @@ class ELFResolver:
             logger.info("No cached database of %s: IDA analyzes it afresh", self._binary)
         target = self._binary if self._analyzed_afresh else self._database
         self._session = IDASession(
-            self._idat, target, log=self._workspace / "ida.log",
+            self._ida, target, log=self._workspace / "ida.log",
             new_database=self._database if self._analyzed_afresh else None, timeout=self._startup_timeout,
         )

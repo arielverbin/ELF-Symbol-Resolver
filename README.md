@@ -200,8 +200,10 @@ nested, it is answered from memory.
 A new constraint is three pieces: a dataclass in `elfresolver/constraints.py`, the `Symbol`
 method adding it, and a class method on its kind inside IDA, marked with the constraint it
 meets: `@SymbolResolution.constraint("calls")` for one returning every match at once, or
-`@SymbolResolution.constraint("uses_const", cost=2)` for one checking a single candidate. A new
-kind is a `Symbol` class, and an `IDASymbol` class registering itself for it
+`@SymbolResolution.constraint("uses_const", cost=2)` for one checking a single candidate. Each
+constraint has one method meeting it, called with the kind being resolved as `cls`: a kind
+specializes it through the class methods it calls (`names_of`, `filter_from`, `references_to`). A
+new kind is a `Symbol` class, and an `IDASymbol` class registering itself for it
 (`class IDAVTable(IDASymbol, kind=VTable)`) in `elfresolver/ida/symbols/`.
 
 Everything IDA's side logs is logged again on your side, under the same logger names. An

@@ -8,18 +8,18 @@ the stand-ins for IDA's modules (see fakes.example_binary and fake_ida_modules.p
   * An interrupted resolve raises ResolveInterrupted, and isn't remembered.
   * A variable holding a function's pointer is found by it, and finds it.
   * Constraints checking candidates one by one run last, lowest cost first, on what the others left; once none are, the rest are skipped.
-  * Each kind meets exactly the constraints its Symbol class can add.
+  * Each constraint is met by exactly one method.
   * Calls are followed as deep as asked; constants are found as wide as they are used.
 """
 import logging
 import pytest
 import fake_ida_modules
-from elfresolver.constraints import UsesConst
+from elfresolver.constraints import IDAConstraint
 from elfresolver.symbols import Function, GlobalVar, PLTEntry, String, VTable
 from elfresolver import ResolvedSymbol
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.ida.resolution import SymbolResolution
-from elfresolver.ida.symbols import IDAFunction, IDAGlobalVar, IDAPLTEntry, IDAString, IDASymbol, IDAVTable
+from elfresolver.ida.symbols import IDASymbol
 from fakes import FakeBinary, example_binary
 
 RECVFROM, PUTS, PROMPT, SERVED = 0x401030, 0x401040, 0x402004, 0x404010
@@ -167,25 +167,13 @@ def test_checks_run_lowest_cost_first(resolution):
     assert resolution.resolve(Function().structured_with(loops=1).uses_const(0x5DEECE66D)).matches == frozenset()
 
 
-ANY_KIND = {"matching", "references", "referenced_by"}
+def test_every_constraint_has_one_method_meeting_it():
+    assert set(SymbolResolution._constraint_methods) == {constraint.method for constraint in IDAConstraint.__subclasses__()}
 
 
-@pytest.mark.parametrize(("kind", "methods"), [
-    (IDAFunction, ANY_KIND | {"calls", "called_by", "uses_const", "structured_with"}),
-    (IDAPLTEntry, ANY_KIND | {"calls", "called_by", "uses_const", "structured_with"}),
-    (IDAGlobalVar, ANY_KIND),
-    (IDAString, ANY_KIND),
-    (IDAVTable, ANY_KIND),
-], ids=lambda value: value.__name__ if isinstance(value, type) else "")
-def test_each_kind_meets_the_constraints_its_symbol_class_adds(kind, methods):
-    client_kind = next(client for client, ida_kind in IDASymbol.kinds.items() if ida_kind is kind)
-    assert methods == {name for name in methods if callable(getattr(client_kind, name, None))}
-    assert set(SymbolResolution._methods_of(kind)) == methods
-
-
-def test_a_constraint_its_kind_cant_carry_fails(resolution):
-    with pytest.raises(TypeError, match=r"IDAGlobalVar meets no \.uses_const\(\)"):
-        resolution.resolve(GlobalVar.from_constraints([UsesConst(1)]))
+def test_a_constraint_is_met_by_one_method_only():
+    with pytest.raises(TypeError, match=r"\.matching\(\) is already met by IDASymbol\.matching"):
+        SymbolResolution.constraint("matching")(lambda cls, address, pattern: True)
 
 
 def test_once_nothing_is_left_the_rest_is_skipped(resolution, caplog):

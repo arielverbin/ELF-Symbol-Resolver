@@ -2,7 +2,7 @@ from __future__ import annotations
 import functools
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Iterable, Iterator, TypeVar
 from elfresolver.constraints import IDAConstraint
 from elfresolver.exceptions import ResolveInterrupted
 from elfresolver.symbols import Symbol
@@ -11,23 +11,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_Method = TypeVar("_Method", bound=Callable[..., Any])
+_Function = TypeVar("_Function", bound=Callable[..., Any])
 
 
 @dataclass(frozen=True)
 class _ConstraintMethod:
-    """A kind's method meeting a constraint (see SymbolResolution.constraint):
-    the constraint's `method`, its cost, and its own name."""
-    meets: str
+    """The class method meeting a constraint (see SymbolResolution.constraint): its function, and its cost."""
+    function: Callable[..., Any]
     cost: int
-    name: str
 
 
 class SymbolResolution:
     """
-    Resolves symbols in the database IDA has open: each constraint met by the method its kind
-    marks for it (see constraint), each symbol equal to another resolved once.
+    Resolves symbols in the database IDA has open: each constraint met by the method registered
+    for it (see constraint), each symbol equal to another resolved once.
     """
+
+    _constraint_methods: ClassVar[dict[str, _ConstraintMethod]] = {}  # by IDAConstraint.method: the one method meeting each
 
     def __init__(self, interrupted: Callable[[], bool] = lambda: False) -> None:
         """`interrupted` is asked before each constraint is met, and before each candidate is checked:
@@ -35,19 +35,21 @@ class SymbolResolution:
         self.interrupted = interrupted
         self._resolved: dict[Symbol, IDASymbol] = {}
 
-    @staticmethod
-    def constraint(method: str, cost: int = 0) -> Callable[[_Method], _Method]:
+    @classmethod
+    def constraint(cls, method: str, cost: int = 0) -> Callable[[_Function], _Function]:
         """
-        Marks a kind's class method as meeting the constraint whose `method` is `method`
-        (IDAConstraint.method: "calls"). Cost 0: it takes the constraint's fields and returns
-        every symbol of the kind meeting it. Above 0: it takes one candidate, then the fields,
-        and returns True if the candidate meets it. These run after the others, lowest cost
-        first, on the candidates left.
+        Registers a class method implementing the constraint named `method`
+        (i.e. IDAConstraint.method: "calls"), specifying a cost: constrains are evaluated sorted by cost,
+        to let heavy constraints run on a reduced set of candidates, for optimization.
+        Cost 0: it takes the constraint's fields and returns every symbol of the kind meeting it.
+        Above 0: it takes one candidate, then the fields, and returns True if the candidate meets it.
         """
-        def mark(function: _Method) -> _Method:
-            function.constraint_method = _ConstraintMethod(method, cost, function.__name__)  # type: ignore[attr-defined]
+        def register(function: _Function) -> _Function:
+            if (registered := cls._constraint_methods.get(method)) is not None:
+                raise TypeError(f".{method}() is already met by {registered.function.__qualname__}")
+            cls._constraint_methods[method] = _ConstraintMethod(function, cost)
             return function
-        return mark
+        return register
 
     def resolve(self, symbol: Symbol) -> IDASymbol:
         """`symbol`, resolved (see _apply_constraints): once for every symbol equal to it, which is answered from memory."""
@@ -69,7 +71,7 @@ class SymbolResolution:
         left. Once nothing is, the rest are skipped, and the symbols in them never resolved.
         """
         matches: frozenset[int] | None = None  # every symbol of the kind, until a constraint is met
-        for constraint in sorted(symbol.constraints, key=lambda constraint: self._method_meeting(kind, constraint).cost):
+        for constraint in sorted(symbol.constraints, key=lambda constraint: self._constraint_methods[constraint.method].cost):
             if matches is not None and not matches:
                 break
             matches = self._meet(kind, constraint, matches)
@@ -78,18 +80,24 @@ class SymbolResolution:
 
     def _meet(self, kind: type[IDASymbol], constraint: IDAConstraint, candidates: frozenset[int] | None) -> frozenset[int]:
         """What `constraint` leaves of `candidates` (None: every symbol of `kind`), once the symbols in it resolve."""
-        method = self._method_meeting(kind, constraint)
-        meet = getattr(kind, method.name)
-        fields = [self.resolve(value) if isinstance(value, Symbol) else value for value in vars(constraint).values()]
+        method = self._constraint_methods[constraint.method]
+        meet = functools.partial(method.function, kind)  # the class method, bound to the kind being resolved
+        fields = [
+            # recursively solve the constraint's dependencies
+            self.resolve(value) if isinstance(value, Symbol) else value
+            for value in vars(constraint).values()
+        ]
         self._stop_if_cancelled()  # IDA's side runs on one thread: nothing else would notice a cancel
         if method.cost == 0:
             found = frozenset(meet(*fields))
             return found if candidates is None else candidates & found
+        # for heavy constraints, iterate over the candidates and feed `meet` with every one
         return frozenset(self._checked(meet, fields, kind.all() if candidates is None else candidates))
 
     def _checked(self, check: Callable[..., bool], fields: list[Any], candidates: Iterable[int]) -> Iterator[int]:
         """The candidates `check` passes, given `fields`: one by one, noticing a cancel before each."""
         for candidate in candidates:
+            # assuming `check` is heavy, we need to call `_stop_if_cancelled` for every candidate
             self._stop_if_cancelled()
             if check(candidate, *fields):
                 yield candidate
@@ -102,29 +110,6 @@ class SymbolResolution:
     @staticmethod
     def _kind_of(symbol: Symbol) -> type[IDASymbol]:
         """The IDASymbol class resolving `symbol`'s kind (see IDASymbol.kinds)."""
-        from elfresolver.ida.symbols import IDASymbol  # with every kind it registers: they import this module, for constraint()
+        # imported here, as it imports every kind, which imports this module (for constraint) and registers its methods
+        from elfresolver.ida.symbols import IDASymbol
         return IDASymbol.kinds[type(symbol)]
-
-    @staticmethod
-    def _method_meeting(kind: type[IDASymbol], constraint: IDAConstraint) -> _ConstraintMethod:
-        """The method of `kind` meeting `constraint`; a TypeError if it has none."""
-        if (method := SymbolResolution._methods_of(kind).get(constraint.method)) is None:
-            raise TypeError(f"{kind.__name__} meets no .{constraint.method}()")
-        return method
-
-    @staticmethod
-    @functools.cache  # a kind's methods are set once it's defined
-    def _methods_of(kind: type[IDASymbol]) -> dict[str, _ConstraintMethod]:
-        """Every method of `kind` meeting a constraint, by the constraint's `method`: its own, and those it inherits
-        without overriding."""
-        methods: dict[str, _ConstraintMethod] = {}
-        for klass in reversed(kind.__mro__):  # a subclass last: its methods replace those it inherits
-            own: dict[str, _ConstraintMethod] = {}
-            for attribute in vars(klass).values():
-                marked = getattr(getattr(attribute, "__func__", attribute), "constraint_method", None)  # inside its classmethod
-                if isinstance(marked, _ConstraintMethod):
-                    if marked.meets in own:
-                        raise TypeError(f"{klass.__name__} meets .{marked.meets}() twice: by {own[marked.meets].name} and {marked.name}")
-                    own[marked.meets] = marked
-            methods.update(own)
-        return methods

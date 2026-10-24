@@ -1,11 +1,12 @@
 # ELF Symbol Resolver
 
-Find functions and globals in stripped ELF binaries by what they call and reference.
+elfresolver finds symbols in stripped ELF binaries. A symbol is described by its relations to
+the rest of the binary (the functions it calls, the strings and globals it references, the
+constants it uses) rather than by its name or address. elfresolver opens the binary in a
+headless IDA and returns every address that fits the description.
 
-This tool lets you formalize relations between different symbols in an ELF binary.
-Those relations, defined as `constraints`, lets you reverse-engineer a binary once,
-and apply it again when new builds arrive: another architecture, another optimization
-level, or changes in source files.
+The description holds wherever those relations do, so one description finds the same symbol
+across builds: other architectures, other optimization levels, or changed source files.
 
 ```python
 from elfresolver import ELFResolver
@@ -23,65 +24,102 @@ with ELFResolver("build/server.stripped") as resolver:
 
 ## Quick start
 
-Requires Python 3.11+, and IDA (8.x or 9.x) with its Python switched to 3.11+ (`idapyswitch`).
-Nothing needs to be installed into IDA's Python. From a checkout of this repository:
+Requires Python 3.11+, and IDA 8.x or 9.x with its Python switched to 3.11+ (`idapyswitch`).
+Nothing is installed into IDA's Python.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install .
+pip install ".[examples]"
 
-IDADIR=/path/to/ida python examples calculator --opt O1 --target x86_64 --verbose  
+export IDADIR=/path/to/ida        # or ELFResolver(..., ida_dir=...)
+python demo calculator --opt O1 --target x86_64 -v
 ```
 
 
 ## Symbols
 
-| Kind        | What it matches                                                                 |
-|-------------|----------------------------------------------------------------------------------|
-| `Function`  | a function of the binary's own code                                             |
-| `PLTEntry`  | an imported function's PLT stub, named by the import's demangled name (a `Function` too) |
-| `GlobalVar` | a data item where variables live (`.data`, `.bss`, `.rodata`, ...), other than a string: as IDA typed it (see below) |
-| `String`    | a NUL-terminated string literal, named by its text                               |
-| `VTable`    | a C++ class's virtual table (Itanium ABI), found through its RTTI, named by its class (`VTable("net::Handler")`) |
+A symbol is a kind, plus the constraints it must satisfy. Every kind takes an optional exact
+name: `PLTEntry("recvfrom")`, `String("enter input")`.
+
+| Kind        | Matches |
+| ----------- | --- |
+| `Function`  | a function of the binary's own code |
+| `PLTEntry`  | an import's PLT stub, named by the import's demangled name |
+| `GlobalVar` | a data item where variables live (`.data`, `.bss`, `.rodata`, ...), other than a string |
+| `String`    | a NUL-terminated string literal, named by its text |
+| `VTable`    | a C++ class's vtable (Itanium ABI), found through RTTI and named by its class |
+
 
 ## Constraints
 
-Constraints are applied to symbols, some constraints are global and some can be applied to certain symbols.
-Applying a constraint updates the symbol and returns it back so constraints can be accumulated.
-Constraints can receive dependencies which are other symbols (i.e. `Function().calls(PLTEntry("recvfrom"))`) so
-they can be nested.
+Each constraint returns a new symbol, so symbols can be stored, combined, and nested inside
+other constraints.
 
-A few examples,
+| Constraint        | On         | Matches a symbol that... |
+| ----------------- | ---------- | --- |
+| `matching`        | every kind | has a name matching a regular expression (a string: its text) |
+| `references`      | every kind | refers to another symbol: code taking its address, or data pointing at it |
+| `referenced_by`   | every kind | another symbol refers to |
+| `calls`           | `Function` | calls another function, directly, by a tail jump, or through a thunk |
+| `called_by`       | `Function` | another function calls |
+| `uses_const`      | `Function` | uses an integer constant |
+| `structured_with` | `Function` | decompiles to given numbers of loops, ifs and switch cases |
 
-| Constraint                | On          | Holds when the symbol...                                            |
-|---------------------------|-------------|---------------------------------------------------------------------|
-| `.matching(regex)`        | every kind  | has a name (a string: its text) the regex finds a match in          |
-| `.referenced_by(symbol)`  | every kind  | has its address referred to by `symbol`                             |
-| `.calls(function)` | `Function` | calls `function`: directly, by a tail jump, or through a thunk; with a `max_depth` above 1 (None: any), through functions calling it too |
-| `.structured_with(...)` | `Function` | has these in its decompiled code (Hex-Rays'): each a count, or `(at least, at most)` with `None` for unbounded |
+- `calls` and `called_by` take `max_depth` (1 by default, `None` for any depth) to follow calls
+  through the functions in between.
+- `uses_const` finds the value at any width it fits (`-1` is `0xFFFFFFFF` in 32 bits): as an
+  immediate, a displacement, a literal pool's word, or built in parts (ARM's `MOVZ`/`MOVK`,
+  `MOVW`/`MOVT`).
+- `structured_with(loops=, ifs=, switch_cases=)` takes each count as `n` or `(at least, at most)`,
+  with `None` for unbounded. It needs IDA's Hex-Rays decompiler.
 
-`resolve(symbol)` returns its one match, a `ResolvedSymbol` with an `address` (as linked), an
-`offset` (from the image base: add it to where the binary is loaded), a `name` and a `size`.
-`resolve_all(symbol)` returns every match. When a symbol matches nothing, `resolve()` raises
-`SymbolNotFoundError`; when it matches several things, `AmbiguousSymbolError`.
+`resolve(symbol)` returns the one match, and raises `SymbolNotFoundError` for none and
+`AmbiguousSymbolError` for several. `resolve_all(symbol)` returns every match. A match is a
+`ResolvedSymbol`: its `address` as linked, its `offset` from the image base, its `name` and its
+`size`.
 
 ### Writing symbols that last
 
-Anchor your symbols on what survives from build to build: imports, strings and globals. Constraints allow
-the source code to be modified, as long as it does not break the constraint. `resolve()` failing loudly
-is the safety net: a symbol that still resolves to exactly one match still describes one thing.
+Anchor symbols on what survives between builds (imports, strings, constants), then follow a
+hop or two of calls and references. If a build changes too much, `resolve()` raises instead of
+guessing.
 
-Architectures are normalized inside IDA and don't matter to a symbol. Normalization includes,
+Compiler and architecture differences are handled inside IDA, so symbols don't need to account
+for them:
 
-- a tail jump (`-O2`) is a call, and a local thunk is seen through: so is the PLT stub a
-  shared object calls its own exported functions through, and ARM's Thumb entry to a stub
-- i686's PC thunk (`__x86.get_pc_thunk.bx`), which PIC code calls for its own address, is no call
-- a function IDA folded into a caller that only tail-jumps to it (aarch64 at `-O2`) is one of its own
-- PIC code reaching a global through its GOT slot references the global, and taking an import's
-  address references its `PLTEntry`
+- tail jumps count as calls, and thunks are seen through (local thunks, PLT stubs a shared object
+  calls its own exports through, ARM's Thumb entries to stubs)
+- i686's PC thunk (`__x86.get_pc_thunk.bx`) doesn't count as a call
+- a function IDA folded into a caller that only tail-jumps to it is a function of its own
+- reaching a global through its GOT slot, or an address through an ARM literal pool, refers to
+  the global or the address itself; taking an import's address refers to its `PLTEntry`
+- Thumb function pointers (the address plus one) refer to the function
 - PLT stubs are found in `.plt`, `.plt.sec` (`-fcf-protection`) and `.plt.got`
-- etc...
+
+
+## Demos
+
+`demo/` holds six example programs, each a C++ source and the symbols to find in it:
+
+| Demo             | Program                                  | Shows |
+| ---------------- | ---------------------------------------- | --- |
+| `http_server`    | an HTTP server                           | imports and strings as anchors, then calls |
+| `game_entities`  | a game's entities and virtual functions  | vtables, multiple inheritance |
+| `firmware`       | a thermostat's firmware                  | globals: tables, statics, struct fields |
+| `file_inspector` | a file identifier and checksummer        | constants: CRC-32, FNV-1a, magic numbers |
+| `log_pipeline`   | an access log pipeline                   | call depth |
+| `calculator`     | a lexer, a parser and a stack machine    | decompiled structure |
+
+A run compiles the program, strips it, resolves its symbols, and checks each result against the
+unstripped build's symbol table. It needs the target's cross compiler and binutils
+(`x86_64-linux-gnu-g++`, `aarch64-linux-gnu-g++` or `arm-linux-gnueabihf-g++`).
+
+```bash
+python demo http_server
+python demo all --target aarch64 --opt O0 -vv     # -v: info logs, -vv: debug logs
+```
+
 
 ## How it works
 
@@ -97,36 +135,42 @@ Architectures are normalized inside IDA and don't matter to a symbol. Normalizat
                └──────▶ symbols · constraints · protocol ◀──────┘
 ```
 
-`ELFResolver` finds IDA (`IDAInstallation`) and starts `idat` headless on the binary with
-`elfresolver/ida/bootstrap.py`, which puts the resolver's own copy of elfresolver on IDA's
-`sys.path`.
+`ELFResolver` finds IDA (`$IDADIR`, or `idat` on `PATH`) and starts it headless on the binary.
+IDA runs `elfresolver/ida/bootstrap.py`, which imports elfresolver from the resolver's own
+copy, connects back, and answers each symbol it is sent.
 
-Everything IDA's side logs is logged again on your side, under the same logger names. An
-exception inside IDA is raised as an `IDAError`, with IDA's traceback attached as a note.
+Each constraint narrows the symbol's candidates. Constraints that follow other symbols run
+first; those that check candidates one at a time (`matching`, `uses_const`, `structured_with`)
+run last, cheapest first, and stop once nothing is left. Each symbol is resolved once per
+session, and answered from memory after that.
 
-**Ctrl+C** cancels the resolve under way: IDA stays up, and `resolve()` goes on working. A
-second Ctrl+C, or one during auto-analysis, kills IDA. IDA runs in a process group of its own,
-so the console's Ctrl+C reaches only the resolver.
+The first run on a binary waits for IDA's auto-analysis: seconds for a small binary, about a
+minute and a half for 12 MB. After that, resolves take milliseconds.
 
-**The database cache** keeps the IDA database of every binary IDA analyzed, keyed by the
-SHA-256 of its content, under `$ELFRESOLVER_CACHE` (by default, the platform's cache directory).
-Only the first run on a binary waits for auto-analysis. Entries are never opened in place:
-IDA works on a copy, so neither concurrent resolvers nor a crashed IDA can corrupt one. A
-database is stored only after its IDA exited cleanly.
+- **Logs and errors**: IDA's logs are re-emitted on your side under the same logger names. An
+  exception inside IDA is raised as an `IDAError`, with IDA's traceback attached.
+- **Ctrl+C** cancels the resolve in progress and keeps IDA running. A second Ctrl+C, or one during
+  auto-analysis, stops IDA.
+- **Database cache**: each analyzed binary's IDA database is kept under `$ELFRESOLVER_CACHE` (the
+  platform's cache directory by default), keyed by the binary's SHA-256. IDA works on a copy, so
+  a crash can't corrupt the cache.
 
-### Known limitations
 
-- **Thread-locals** aren't found: code reaches one through the thread pointer and its offset in
-  the TLS block (`fs:-4`, `tpidr_el0`), which IDA cross-references to nothing.
-- **Section anchors**: GCC's `-O2` reaches ARM's statics as the first static of their section,
-  plus an offset. IDA refers to that first static, and not always to the static used.
-- **Constants**: a 32-bit target uses a 64-bit constant a half at a time (`0x5DEECE66D` is
-  `0xDEECE66D` and `5`), and a division by a constant is a multiplication by another.
-- **Decompiled structure** needs IDA's Hex-Rays decompiler for the binary's processor:
-  without it, `.structured_with()` raises an `IDAError` saying so.
-- **VTables** need RTTI or a `_ZTV` symbol (`-fno-rtti` and stripped finds none). Without a
-  symbol, a table with virtual bases starts at its offset to top (past its vcall and vbase
-  offsets), and a construction vtable of base `B` isn't told apart from `B`'s own.
+## Known limitations
+
+- **Globals are items as IDA typed them**: a struct read field by field may be one item per
+  field, and a table of pointers one item per pointer.
+- **Section anchors**: at `-O2`, GCC reaches ARM statics through the first static of their
+  section plus an offset, and IDA refers to that first static instead.
+- **Thread-locals** aren't found: code reaches them through the thread pointer, which IDA doesn't
+  cross-reference.
+- **Constants**: 32-bit targets split 64-bit constants in halves, and a division by a constant
+  becomes a multiplication by another.
+- **Decompiled structure** changes with optimization (unrolled loops, switches turned into tables
+  or compares): ranges hold up better than exact counts.
+- **VTables** need RTTI or a `_ZTV` symbol. Without a symbol, a construction vtable of class `B`
+  can't be told apart from `B`'s own.
+
 
 ## Running the tests
 
@@ -136,3 +180,7 @@ sudo apt-get install {gcc,g++}-{x86-64-linux-gnu,i686-linux-gnu,aarch64-linux-gn
 pip install -e ".[dev]"
 pytest -rsx
 ```
+
+Most tests run without IDA, on stand-ins for IDA's Python modules. Tests marked `ida` build
+real programs with each installed cross compiler, strip them, and open them in IDA. They are
+skipped when IDA or a compiler is missing.

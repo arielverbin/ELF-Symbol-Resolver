@@ -100,16 +100,9 @@ for them:
 
 ## Demos
 
-`demo/` holds six example programs, each a C++ source and the symbols to find in it:
-
-| Demo             | Program                                  | Shows |
-| ---------------- | ---------------------------------------- | --- |
-| `http_server`    | an HTTP server                           | imports and strings as anchors, then calls |
-| `game_entities`  | a game's entities and virtual functions  | vtables, multiple inheritance |
-| `firmware`       | a thermostat's firmware                  | globals: tables, statics, struct fields |
-| `file_inspector` | a file identifier and checksummer        | constants: CRC-32, FNV-1a, magic numbers |
-| `log_pipeline`   | an access log pipeline                   | call depth |
-| `calculator`     | a lexer, a parser and a stack machine    | decompiled structure |
+`demo/` holds six example programs, each a C++ source and the symbols to find in it. 
+They demonstrate resolving through PLT entries, VTables, string referencing, call graphs,
+magic values used, decompiled structured, etc...
 
 A run compiles the program, strips it, resolves its symbols, and checks each result against the
 unstripped build's symbol table. It needs the target's cross compiler and binutils

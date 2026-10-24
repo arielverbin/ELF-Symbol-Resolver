@@ -98,22 +98,6 @@ for them:
 - PLT stubs are found in `.plt`, `.plt.sec` (`-fcf-protection`) and `.plt.got`
 
 
-## Demos
-
-`demo/` holds six example programs, each a C++ source and the symbols to find in it. 
-They demonstrate resolving through PLT entries, VTables, string referencing, call graphs,
-magic values used, decompiled structured, etc...
-
-A run compiles the program, strips it, resolves its symbols, and checks each result against the
-unstripped build's symbol table. It needs the target's cross compiler and binutils
-(`x86_64-linux-gnu-g++`, `aarch64-linux-gnu-g++` or `arm-linux-gnueabihf-g++`).
-
-```bash
-python demo http_server
-python demo all --target aarch64 --opt O0 -vv     # -v: info logs, -vv: debug logs
-```
-
-
 ## How it works
 
 ```
@@ -149,7 +133,7 @@ minute and a half for 12 MB. After that, resolves take milliseconds.
   a crash can't corrupt the cache.
 
 
-## Known limitations
+### Known limitations
 
 - **Globals are items as IDA typed them**: a struct read field by field may be one item per
   field, and a table of pointers one item per pointer.
@@ -163,6 +147,24 @@ minute and a half for 12 MB. After that, resolves take milliseconds.
   or compares): ranges hold up better than exact counts.
 - **VTables** need RTTI or a `_ZTV` symbol. Without a symbol, a construction vtable of class `B`
   can't be told apart from `B`'s own.
+
+
+---
+
+## Demos
+
+`demo/` holds six example programs, each a C++ source and the symbols to find in it. 
+They demonstrate resolving through PLT entries, VTables, string referencing, call graphs,
+magic values used, decompiled structured, etc...
+
+A run compiles the program, strips it, resolves its symbols, and checks each result against the
+unstripped build's symbol table. It needs the target's cross compiler and binutils
+(`x86_64-linux-gnu-g++`, `aarch64-linux-gnu-g++` or `arm-linux-gnueabihf-g++`).
+
+```bash
+python demo http_server
+python demo all --target aarch64 --opt O0 -vv     # -v: info logs, -vv: debug logs
+```
 
 
 ## Running the tests

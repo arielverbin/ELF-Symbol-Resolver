@@ -2,9 +2,11 @@ from __future__ import annotations
 from typing import Iterable, Iterator
 import ida_bytes # type: ignore
 import ida_name # type: ignore
+import ida_segment # type: ignore
 import idautils # type: ignore
 from elfresolver.ida.layout import Region
 from elfresolver.ida.symbols.function import IDAFunction
+from elfresolver.ida.symbols.string import IDAString
 from elfresolver.ida.symbols.symbol import IDASymbol
 from elfresolver.symbols import GlobalVar
 
@@ -59,14 +61,15 @@ class IDAGlobalVar(IDASymbol, kind=GlobalVar):
         """
         True for the item at `head` (where variables live) if it is a variable's: data
         other than a string literal, or bytes IDA left untyped, as an object code only
-        takes the address of. A switch's table of case addresses is none: data whose
-        every pointer lands inside a function, never on its entry (nor one past it: a
-        Thumb function's pointer).
+        takes the address of.
         """
         flags = ida_bytes.get_flags(head)
+        read_only = not ida_segment.getseg(head).perm & ida_segment.SEGPERM_WRITE
+        if ida_bytes.is_strlit(flags) or read_only and head in IDAString.literals():
+            return False
         if ida_bytes.is_unknown(flags):
             return True
-        if not ida_bytes.is_data(flags) or ida_bytes.is_strlit(flags):
+        if not ida_bytes.is_data(flags):
             return False
         targets = list(idautils.DataRefsFrom(head))  # all of the item's (see references_from)
         return not targets or any(

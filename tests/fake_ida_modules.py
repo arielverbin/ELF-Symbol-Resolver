@@ -8,7 +8,7 @@ as IDA would show an ELF:
 
     .plt     its PLT stubs: thunks of their imports, in `extern`
     .text    its functions
-    .rodata  its strings, each a string literal
+    .rodata  its strings, each a string literal (a mistyped one, a data item), read-only
     .data    its globals, each an initialized data item
     extern   an import for each PLT stub, where IDA puts them
 
@@ -26,7 +26,8 @@ from pathlib import Path
 from fakes import FakeBinary
 
 _EXTERN = 0x7F000000  # where the imports go: far from any address a test picks
-_SEGMENTS = {"Function": ".text", "PLTEntry": ".plt", "String": ".rodata", "GlobalVar": ".data"}
+_SEGMENTS = {"Function": ".text", "PLTEntry": ".plt", "String": ".rodata", "MistypedString": ".rodata", "GlobalVar": ".data"}
+_PERMISSIONS = {".text": 5, ".plt": 5, ".rodata": 4, ".data": 6, "extern": 0}  # read 4, write 2, execute 1
 
 # An item's flags, as get_flags() gives them (for the is_* and has_* functions to read).
 _CODE, _DATA, _STRLIT, _VALUE, _XREF, _IMMD = 1, 2, 4, 8, 16, 32
@@ -39,6 +40,7 @@ class Segment:
     type: int
     start_ea: int
     end_ea: int
+    perm: int
 
     def size(self) -> int:
         return self.end_ea - self.start_ea
@@ -90,7 +92,9 @@ class FakeIDA:
 
     BADADDR = 0xFFFFFFFFFFFFFFFF
     SEG_XTRN, SEG_CODE, SEG_DATA = 1, 2, 3
+    SEGPERM_WRITE = 2
     FUNC_THUNK = 0x80
+    ARM_mov, ARM_movk, ARM_movt = 23, 496, 269
     fl_CF, fl_CN, fl_JF, fl_JN, fl_F = 16, 17, 18, 19, 21
     dr_O = 1
     segment_t = Segment
@@ -305,13 +309,13 @@ class FakeIDA:
     def _segment_of(self, name: str) -> Segment:
         items = [item for item in self._items.values() if item.segment == name]
         kind = {".text": self.SEG_CODE, ".plt": self.SEG_CODE, "extern": self.SEG_XTRN}.get(name, self.SEG_DATA)
-        return Segment(name, kind, min(item.start for item in items), max(item.start + item.size for item in items))
+        return Segment(name, kind, min(item.start for item in items), max(item.start + item.size for item in items), _PERMISSIONS[name])
 
     def _bytes_of(self, segment: Segment) -> bytearray:
         """The segment's content: its strings' text, and zeros elsewhere."""
         content = bytearray(segment.size())
         for address, symbol in self.binary.symbols.items():
-            if symbol.kind == "String" and segment.start_ea <= address < segment.end_ea:
+            if symbol.kind in ("String", "MistypedString") and segment.start_ea <= address < segment.end_ea:
                 text = (symbol.name or "").encode()
                 content[address - segment.start_ea:address - segment.start_ea + len(text)] = text
         return content
@@ -328,6 +332,8 @@ _MODULES = {
         "CV_FAST", "cit_if", "cit_for", "cit_while", "cit_do", "cit_switch",
     ],
     "ida_funcs": ["get_func", "get_func_name", "calc_func_size", "calc_thunk_func_target", "FUNC_THUNK"],
+    "ida_allins": ["ARM_mov", "ARM_movk", "ARM_movt"],
+    "ida_idp": [],  # ARM's only, which no fake is
     "ida_ida": ["inf_get_procname", "inf_is_64bit"],
     "ida_idaapi": ["BADADDR"],
     "ida_loader": ["save_database"],
@@ -335,7 +341,7 @@ _MODULES = {
     "ida_name": ["get_name", "demangle_name"],
     "ida_pro": ["qexit"],
     "ida_ua": ["get_immvals"],
-    "ida_segment": ["getseg", "get_segm_name", "get_segm_qty", "getnseg", "segment_t", "SEG_CODE", "SEG_DATA", "SEG_XTRN"],
+    "ida_segment": ["getseg", "get_segm_name", "get_segm_qty", "getnseg", "segment_t", "SEG_CODE", "SEG_DATA", "SEG_XTRN", "SEGPERM_WRITE"],
     "ida_xref": ["fl_CF", "fl_CN", "fl_JF", "fl_JN", "fl_F", "dr_O"],
     "idautils": ["Functions", "Chunks", "Heads", "Names", "XrefsFrom", "XrefsTo", "DataRefsFrom", "DataRefsTo"],
     "idc": ["get_idb_path"],

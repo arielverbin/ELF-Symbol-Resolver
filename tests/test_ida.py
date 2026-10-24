@@ -387,11 +387,7 @@ def test_a_pretty_function_is_a_string_literal_like_any(server):
     server.resolve(String("T net::clamped(T, T, T) [with T = double]"))
 
 
-def test_every_instance_of_a_template_is_found_by_a_pattern(server, request):
-    limitation(request, when=server.target.triplet == "arm-linux-gnueabihf", reason=(
-        "IDA leaves some of armhf's PC-relative loads unresolved (ldr from a literal pool, then add pc, "
-        "two instructions apart): the double instance's __PRETTY_FUNCTION__ has no reference to it"
-    ))
+def test_every_instance_of_a_template_is_found_by_a_pattern(server):
     symbol = Function().references(String().matching(r"^T net::clamped\(T, T, T\) \[with T = "))
     server.resolves_all(symbol, to=["int net::clamped<int>(int, int, int)", "double net::clamped<double>(double, double, double)"])
 
@@ -452,7 +448,11 @@ def test_every_virtual_function_is_found_through_its_vtable(server):
     assert {"net::Inventory::label() const", "net::Inventory::count() const", "non-virtual thunk to net::Inventory::count() const"} <= found, found
 
 
-def test_the_code_referring_to_a_vtable_makes_or_unmakes_its_objects(server):
+def test_the_code_referring_to_a_vtable_makes_or_unmakes_its_objects(server, request):
     """At -O2, make_handler constructs EchoHandler in place; at -O0, EchoHandler's constructor and destructor do."""
+    limitation(request, when=server.target.name == "armhf-O2", reason=(
+        "GCC reaches Inventory's vtable in main through a section anchor: EchoHandler's vtable, the first "
+        "of its section, which IDA refers to"
+    ))
     found = {name for match in server.resolve_all(Function().references(VTable("net::EchoHandler"))) for name in server.symbols.at(match.address)}
     assert found and all("EchoHandler" in name or "make_handler" in name for name in found), found

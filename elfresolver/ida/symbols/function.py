@@ -2,9 +2,12 @@ from __future__ import annotations
 import functools
 import itertools
 from typing import Callable, Iterable, Iterator
+import ida_allins # type: ignore
 import ida_bytes # type: ignore
 import ida_funcs # type: ignore
+import ida_ida # type: ignore
 import ida_idaapi # type: ignore
+import ida_idp # type: ignore
 import ida_ua # type: ignore
 import ida_xref # type: ignore
 import idautils # type: ignore
@@ -41,9 +44,17 @@ class IDAFunction(IDASymbol, kind=Function):
     @classmethod
     @SymbolResolution.constraint("uses_const", cost=2)
     def uses_const(cls, entry: int, value: int) -> bool:
-        """True if the function at `entry` uses `value` (see _constants_of), as wide as any operand it fits: -1 is 0xFF in a byte, 0xFFFFFFFF in a dword."""
+        """
+        True if the function at `entry` uses `value` (see _constants_of), as wide as any operand it
+        fits: -1 is 0xFF in a byte, 0xFFFFFFFF in a dword. Or builds it in parts (see _built_in_parts):
+        which only a function using one of its upper 16-bit parts can, as a MOVK's or MOVT's immediate.
+        """
         forms = {value & (1 << 8 * width) - 1 for width in (1, 2, 4, 8) if -(1 << 8 * width - 1) <= value < 1 << 8 * width}
-        return not forms.isdisjoint(cls._constants_of(entry))
+        constants = cls._constants_of(entry)
+        if not forms.isdisjoint(constants):
+            return True
+        upper_parts = {form >> shift & 0xFFFF for form in forms for shift in (16, 32, 48) if form >> shift}
+        return not upper_parts.isdisjoint(constants) and not forms.isdisjoint(_built_in_parts(entry))
 
     @classmethod
     @SymbolResolution.constraint("structured_with", cost=3)
@@ -142,8 +153,8 @@ class IDAFunction(IDASymbol, kind=Function):
         """
         Every integer the function at `entry` uses, as wide as it uses it: its instructions'
         immediates and displacements (x86 adds 0xB as `lea rax, [rdi+0Bh]`; IDA joins
-        aarch64's MOVZ/MOVK and ARM's MOVW/MOVT into one MOV), and the words of its literal
-        pools (data inside it, which its instructions load).
+        aarch64's MOVZ/MOVK and ARM's MOVW/MOVT into one MOV where they're adjacent), and
+        the words of its literal pools (data inside it, which its instructions load).
         """
         constants = set()
         for head in IDAFunction._iter_function_heads([entry]):
@@ -184,3 +195,40 @@ class IDAFunction(IDASymbol, kind=Function):
             return function.start_ea
         target, _ = ida_funcs.calc_thunk_func_target(function)
         return function.start_ea if Region.of(target) in (Region.OWN_CODE, Region.PLT) else None
+
+
+@functools.cache  # one IDA has one database open
+def _built_in_parts(entry: int) -> frozenset[int]:
+    """
+    Every constant the function at `entry` builds on a register in parts, on ARM: a MOV
+    (aarch64's MOVZ or MOVN, ARM's MOVW), then MOVKs (16 bits each, at their shift) or a
+    MOVT (the top 16 bits), which optimized code schedules apart, where IDA doesn't join
+    them. A register holds its MOV's value until another instruction writes it, or a call may.
+    """
+    if ida_ida.inf_get_procname() != "ARM":
+        return frozenset()
+    built: dict[int, int] = {}  # by register: the value its moves put in it, while nothing else wrote it
+    constants = set()
+    instruction = ida_ua.insn_t()
+    for head in IDAFunction._iter_function_heads([entry]):
+        if not ida_ua.decode_insn(instruction, head):
+            continue  # data: a literal pool's word
+        register, immediate = instruction.ops[0], instruction.ops[1]
+        moves = register.type == ida_ua.o_reg and immediate.type == ida_ua.o_imm
+        if moves and instruction.itype == ida_allins.ARM_mov:
+            built[register.reg] = immediate.value
+        elif moves and instruction.itype in (ida_allins.ARM_movk, ida_allins.ARM_movt) and register.reg in built:
+            shift = immediate.specval if instruction.itype == ida_allins.ARM_movk else 16
+            built[register.reg] = built[register.reg] & ~(0xFFFF << shift) | immediate.value << shift
+            constants.add(built[register.reg])
+        elif ida_idp.is_call_insn(instruction):
+            built.clear()  # a call may change any register it needn't preserve
+        else:
+            feature = instruction.get_canon_feature()
+            for index, operand in enumerate(instruction.ops):
+                if operand.type == ida_ua.o_void:
+                    break
+                if operand.type == ida_ua.o_reg and ida_idp.has_cf_chg(feature, index):
+                    # the opcode writes to operand.reg, lose track of its value
+                    built.pop(operand.reg, None)
+    return frozenset(constants)
